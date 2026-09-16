@@ -154,16 +154,16 @@ class DSparkWorkerV2(BaseSpecWorker):
             get_exec().graph.cuda_graph_config.decode.backend != Backend.DISABLED
             and not self._is_pd_prefill
         )
-        if (
-            get_parallel().enable_dp_attention
-            and self._draft_is_moe
-            and ps.attn_tp_size > 1
-        ):
-            raise ValueError(
-                "DSpark + dp attention with a DeepSeek-V4 (MoE) draft requires "
-                "attn_tp == 1 (set --dp-size == --tp). attn_tp > 1 corrupts the "
-                "MoE-under-DP all-reduce."
-            )
+        # if (
+        #     get_parallel().enable_dp_attention
+        #     and self._draft_is_moe
+        #     and ps.attn_tp_size > 1
+        # ):
+        #     raise ValueError(
+        #         "DSpark + dp attention with a DeepSeek-V4 (MoE) draft requires "
+        #         "attn_tp == 1 (set --dp-size == --tp). attn_tp > 1 corrupts the "
+        #         "MoE-under-DP all-reduce."
+        #     )
 
         with self._draft_context():
             bundle = build_draft_tp_worker(
@@ -411,6 +411,10 @@ class DSparkWorkerV2(BaseSpecWorker):
         )
 
     def init_attention_backends(self):
+        from sglang.srt.hardware_backend.npu.extra_ops_loader import (
+            initialize_dspark_a5_sparse_attn_ops,
+        )
+        initialize_dspark_a5_sparse_attn_ops()
         with self._draft_context():
             self._draft_worker.init_attention_backends()
         self._target_hidden_projection_enabled = _configure_target_hidden_projection(
