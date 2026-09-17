@@ -40,23 +40,16 @@ def _sparse_attn_ops():
     """(metadata op, attention op) for the DSV4 shared-KV sparse attention.
 
     A5 reads a quantized KV cache, which is a different kernel rather than a
-    flag on the pre-A5 one. The pre-A5 path uses vllm-ascend's ``_C_ascend``
-    operators, which ship as a standalone extension and must be registered
-    before the handles are resolved.
+    flag on the pre-A5 one.
     """
     if is_npu_arch35():
         return (
             torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv_metadata,
             torch.ops.custom.npu_kv_quant_sparse_attn_sharedkv,
         )
-    from sglang.srt.hardware_backend.npu.extra_ops_loader import (
-        initialize_dspark_a5_sparse_attn_ops,
-    )
-
-    initialize_dspark_a5_sparse_attn_ops()
     return (
-        torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata,
-        torch.ops._C_ascend.npu_sparse_attn_sharedkv,
+        torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata_v2,
+        torch.ops._C_ascend.npu_sparse_attn_sharedkv_v2,
     )
 
 
@@ -1800,35 +1793,21 @@ class DeepseekV4AscendAttnBackend(
             "has_cmp_kv": False,
         }
         c1a_kwargs = base_kwargs | common
-        if is_npu_arch35():
-            # The A5 kv-quant metadata op consumes the device tensors directly.
-            c1a_kwargs = c1a_kwargs | {
-                "cu_seqlens_q": actual_seq_lengths_q_pa,
-                "seqused_kv": actual_seq_lengths_kv,
-            }
+        if self._is_dspark_draft_worker:
+            cu_q_cpu = fm.actual_seq_lengths_q_pa_cpu
+            if cu_q_cpu is not None and cu_q_cpu.numel() > bs + 1:
+                cu_q_cpu = cu_q_cpu[: bs + 1]
+            host_inputs = {"seqused_kv": fm.seq_lens_cpu_int[:bs].int()}
+            if cu_q_cpu is not None:
+                host_inputs["cu_seqlens_q"] = cu_q_cpu
+            c1a_kwargs = c1a_kwargs | host_inputs
+            metadata_op = torch.ops.npu.sparse_attn_sharedkv_metadata_host
         else:
-            # vllm-ascend's `_C_ascend` metadata op also takes the sequence-length
-            # scalars and the output device; the DSpark draft worker additionally
-            # passes the original-KV cu_seqlens. (The sgl-kernel-npu host op takes
-            # CPU mirrors and none of these scalars.)
-            seq_lens_cpu = getattr(fm, "seq_lens_cpu_int", None)
-            if seq_lens_cpu is not None and bs > 0:
-                max_seqlen_kv = int(seq_lens_cpu[:bs].max().item())
-            elif actual_seq_lengths_kv is not None and bs > 0:
-                max_seqlen_kv = int(actual_seq_lengths_kv[:bs].max().item())
-            else:
-                max_seqlen_kv = 0
             c1a_kwargs = c1a_kwargs | {
                 "cu_seqlens_q": actual_seq_lengths_q_pa,
                 "seqused_kv": actual_seq_lengths_kv,
-                "max_seqlen_q": max_seqlen_q,
-                "max_seqlen_kv": max_seqlen_kv,
-                "device": str(actual_seq_lengths_kv.device),
             }
-            if self._is_dspark_draft_worker:
-                c1a_kwargs = c1a_kwargs | {
-                    "cu_seqlens_ori_kv": actual_seq_lengths_q_pa,
-                }
+            metadata_op, _ = _sparse_attn_ops()
         c1a_metadata = metadata_op(**c1a_kwargs)
         kernel_metadata = {"c1a_metadata": c1a_metadata}
 

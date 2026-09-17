@@ -142,8 +142,8 @@ _DSPARK_A5_SPARSE_ATTN_LOADER = TorchOpLoader(
         so_env="SGLANG_DSPARK_A5_EXTRA_OPS_SO",
         namespace="_C_ascend",
         required_ops=(
-            "npu_sparse_attn_sharedkv_metadata",
-            "npu_sparse_attn_sharedkv",
+            "npu_sparse_attn_sharedkv_metadata_v2",
+            "npu_sparse_attn_sharedkv_v2",
         ),
         pre_load_imports=("torch_npu",),
     )
