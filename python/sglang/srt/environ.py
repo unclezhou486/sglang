@@ -545,6 +545,9 @@ class Envs:
     SGLANG_DSPARK_FOLDED_SAMPLING = EnvInt(DsparkFoldedSampling.AUTO)
     SGLANG_DSPARK_FOLDED_PROPOSAL = EnvBool(True)
     SGLANG_DSPARK_STACKED_CTX_KV = EnvBool(True)
+    # Debug/reference path: run DSV4 SWA attention in plain PyTorch instead of
+    # the Ascend sparse kernel. Slow; use it to cross-check the kernel.
+    SGLANG_DSPARK_NATIVE_SWA = EnvBool(False)
     SGLANG_DSPARK_EMBED_IN_GRAPH = EnvBool(True)
     SGLANG_DSPARK_OPT_MARKOV_W2_BF16 = EnvBool(True)
     SGLANG_DSPARK_OPT_MARKOV_W2_TP_SHARD = EnvBool(True)
