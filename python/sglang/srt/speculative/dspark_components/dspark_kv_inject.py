@@ -112,6 +112,19 @@ class TargetHiddenKvInjector:
         state_slot: Optional[torch.Tensor] = None,
         final_pos: Optional[torch.Tensor] = None,
     ) -> None:
+        # D11: probe the injection inputs and the RAW swa_loc (before the commit
+        # mask). is_unified_kv_triton() is HIP-only, so on NPU the else branch is
+        # the one that runs.
+        from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
+            attn_tp_group,
+            dump,
+        )
+
+        dump("D11_cache_loc", cache_loc.float(), attn_tp_group())
+        dump("D11b_positions", positions.float(), attn_tp_group())
+        if commit_lens is not None:
+            dump("D11c_commit_lens", commit_lens.float(), attn_tp_group())
+
         if is_unified_kv_triton():
             swa_loc = self._unified_inject_loc(
                 pool=pool,
@@ -123,6 +136,7 @@ class TargetHiddenKvInjector:
             )
         else:
             swa_loc = pool.translate_loc_from_full_to_swa(cache_loc).to(torch.int32)
+            dump("D11d_swa_loc_raw", swa_loc.float(), attn_tp_group())
             if commit_lens is not None and cache_loc_2d is not None:
                 bs, verify_len = cache_loc_2d.shape
                 col = torch.arange(verify_len, device=cache_loc.device).view(1, -1)
@@ -132,6 +146,7 @@ class TargetHiddenKvInjector:
                 swa_loc = torch.where(
                     committed_mask, swa_loc, torch.full_like(swa_loc, -1)
                 )
+        dump("D11e_swa_loc_final", swa_loc.float(), attn_tp_group())
 
         with torch.inference_mode():
             self.draft_model.write_target_hidden_kv(
@@ -168,18 +183,6 @@ class TargetHiddenKvInjector:
         win = pool.unified_swa_window
         pos = positions.to(torch.int64)
         loc = state_slot.to(torch.int64) * ring + pos % ring
-        # D11: the RAW ring mapping BEFORE the window/commit masks. If
-        # loc == state_slot*ring + pos%ring holds with sane values, the
-        # injection is fine and the bug is in the draft forward instead.
-        from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
-            attn_tp_group,
-            dump,
-        )
-
-        dump("D11_raw_loc", loc.float(), attn_tp_group())
-        dump("D11b_positions", pos.float(), attn_tp_group())
-        dump("D11c_state_slot", state_slot.float(), attn_tp_group())
-        dump("D11d_ring", torch.full_like(pos[:1], float(ring)).float(), None)
         if final_pos is not None:
             keep = pos > (final_pos.to(torch.int64) - win)
             loc = torch.where(keep, loc, torch.full_like(loc, -1))
