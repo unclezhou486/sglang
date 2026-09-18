@@ -133,6 +133,21 @@ class TargetHiddenKvInjector:
                     committed_mask, swa_loc, torch.full_like(swa_loc, -1)
                 )
 
+        # D10: the draft only sees the injected target hidden, so dump the write
+        # locations (and the -1 fraction) plus the hidden fingerprint.
+        from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
+            attn_tp_group,
+            dump,
+        )
+
+        dump("D10_inject_swa_loc", swa_loc.float(), attn_tp_group())
+        dump(
+            "D10b_inject_frac_neg1",
+            (swa_loc < 0).float(),
+            attn_tp_group(),
+        )
+        dump("D10c_inject_target_hidden", target_hidden, attn_tp_group())
+
         with torch.inference_mode():
             self.draft_model.write_target_hidden_kv(
                 main_hidden=target_hidden,

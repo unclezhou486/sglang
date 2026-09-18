@@ -837,6 +837,21 @@ class DSparkWorkerV2(BaseSpecWorker):
             dump,
         )
 
+        # D9: draft's first proposal vs the target's argmax at the anchor, both
+        # from THIS run, so the comparison is meaningful (unlike cross-run
+        # comparisons, which the draft's stochastic sampling invalidates).
+        _tl3 = logits_output.next_token_logits.view(
+            bs, self.verify_num_draft_tokens, -1
+        )
+        _tgt_anchor = _tl3[:, 0, :].argmax(dim=-1)
+        _draft0 = draft_tokens[:, 0].to(torch.int64)
+        dump("D9_draft0", _draft0.float(), attn_tp_group())
+        dump("D9b_target_anchor_argmax", _tgt_anchor.float(), attn_tp_group())
+        dump(
+            "D9c_draft0_eq_target_anchor",
+            (_draft0 == _tgt_anchor).float(),
+            attn_tp_group(),
+        )
         dump("D7_verify_target_logits", logits_output.next_token_logits, attn_tp_group())
         accept = self._verify_executor.accept_and_finalize(
             folded_accept=folded_accept,
