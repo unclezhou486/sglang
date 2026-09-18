@@ -115,7 +115,15 @@ class SpecTpSync:
 
     def sync(self, site: SpecTpSyncSite, values: torch.Tensor) -> torch.Tensor:
         if site in self._sites:
-            self._tp_group.broadcast(values, src=0)
+            # Prefer the group's PyNCCL communicator when present: unlike a
+            # process-group broadcast (GroupCoordinator.broadcast only takes the
+            # PyNCCL path on ROCm) it is graph-capturable, and the DSpark sync
+            # runs inside the captured decode graph. Fall back otherwise.
+            comm = getattr(self._tp_group, "pynccl_comm", None)
+            if comm is not None and not getattr(comm, "disabled", False):
+                comm.broadcast(values, src=0)
+            else:
+                self._tp_group.broadcast(values, src=0)
         return values
 
     def available_memory_gb(self, site: SpecTpSyncSite, device, gpu_id, *, group):
