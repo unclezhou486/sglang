@@ -809,6 +809,12 @@ class DSparkWorkerV2(BaseSpecWorker):
 
         epilogue = self._verify_executor.verify_epilogue
         folded_accept = fold_eligible and run_compact and can_run_cuda_graph
+        from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
+            attn_tp_group,
+            dump,
+        )
+
+        dump("D7_verify_target_logits", logits_output.next_token_logits, attn_tp_group())
         accept = self._verify_executor.accept_and_finalize(
             folded_accept=folded_accept,
             bs=bs,
@@ -821,6 +827,7 @@ class DSparkWorkerV2(BaseSpecWorker):
             prefix_lens=prefix_lens,
             draft_tokens=draft_tokens,
         )
+        dump("D8_verify_correct_len", accept.correct_len.float(), attn_tp_group())
         if batch.return_logprob:
             compute_spec_logprobs(
                 batch,
