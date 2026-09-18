@@ -29,6 +29,7 @@ from sglang.srt.model_executor.forward_batch_info import (
 from sglang.srt.runtime_context import (
     get_disagg,
     get_exec,
+    get_flags,
     get_parallel,
     get_schedule,
     get_spec,
@@ -406,15 +407,20 @@ class DSparkWorkerV2(BaseSpecWorker):
         """Context the draft runs under.
 
         Besides the draft's TP group, layer in the speculative MoE backend / A2A
-        backend selection (upstream #31868). The draft is a separate model, so
-        without these it builds and executes under the TARGET's MoE backend,
-        which is wrong once the two differ (dp attention).
+        backend selection (upstream #31868) -- but ONLY when the config actually
+        declares one. get_speculative_moe_a2a_backend() silently falls back to
+        NONE when --speculative-moe-a2a-backend is unset, and applying that would
+        make the draft run a different MoE backend than the target, which
+        destroys the draft proposals (accept rate -> 0).
         """
         with ExitStack() as stack:
             if self._draft_dp_context_enabled:
                 stack.enter_context(draft_tp_context(get_parallel().attn_tp_group))
-            stack.enter_context(speculative_moe_backend_context())
-            stack.enter_context(speculative_moe_a2a_backend_context())
+            moe = get_flags().moe
+            if moe.speculative_runner_backend is not None:
+                stack.enter_context(speculative_moe_backend_context())
+            if moe.speculative_a2a_backend is not None:
+                stack.enter_context(speculative_moe_a2a_backend_context())
             yield
 
     def alloc_memory_pool(
