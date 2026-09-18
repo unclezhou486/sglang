@@ -154,16 +154,20 @@ class DSparkWorkerV2(BaseSpecWorker):
             get_exec().graph.cuda_graph_config.decode.backend != Backend.DISABLED
             and not self._is_pd_prefill
         )
-        if (
-            get_parallel().enable_dp_attention
-            and self._draft_is_moe
-            and ps.attn_tp_size > 1
-        ):
-            raise ValueError(
-                "DSpark + dp attention with a DeepSeek-V4 (MoE) draft requires "
-                "attn_tp == 1 (set --dp-size == --tp). attn_tp > 1 corrupts the "
-                "MoE-under-DP all-reduce."
-            )
+        # NOTE: upstream enforces attn_tp == 1 here for a MoE (DeepSeek-V4)
+        # draft. It is disabled on this branch so the attn_tp > 1 divergence can
+        # be reproduced and instrumented; see dspark_numeric_dump. Restore the
+        # raise before merging.
+        # if (
+        #     get_parallel().enable_dp_attention
+        #     and self._draft_is_moe
+        #     and ps.attn_tp_size > 1
+        # ):
+        #     raise ValueError(
+        #         "DSpark + dp attention with a DeepSeek-V4 (MoE) draft requires "
+        #         "attn_tp == 1 (set --dp-size == --tp). attn_tp > 1 corrupts the "
+        #         "MoE-under-DP all-reduce."
+        #     )
 
         with self._draft_context():
             bundle = build_draft_tp_worker(
