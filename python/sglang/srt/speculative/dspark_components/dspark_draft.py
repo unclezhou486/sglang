@@ -215,6 +215,7 @@ class DraftBlockProposer:
         draft_block_spec_info,
         tp_sync: SpecTpSync,
         dp_moe_sync: bool = False,
+        draft_dp_context_enabled: bool = False,
     ) -> None:
         self.draft_model = draft_model
         self.draft_model_runner = draft_model_runner
@@ -226,6 +227,9 @@ class DraftBlockProposer:
         self._tp_sync = tp_sync
         self._draft_sampler = None
         self._dp_moe_sync = dp_moe_sync
+        # Mirrors DSparkWorkerV2._draft_dp_context_enabled so _base_logits_context
+        # uses the same TP group as the draft forward.
+        self._draft_dp_context_enabled = draft_dp_context_enabled
         # Persistent (bs, gamma) mask-token buffer: only column 0 (the bonus
         # token) changes per step, so avoid a fresh torch.full every decode.
         self._draft_block_ids_buf: Optional[torch.Tensor] = None
@@ -239,7 +243,13 @@ class DraftBlockProposer:
         self._draft_sampler = draft_sampler
 
     def _base_logits_context(self):
-        if self._dp_moe_sync:
+        # compute_base_logits consumes fwd.raw_hidden, which was produced under
+        # the draft forward's context (_draft_context), so it MUST use the same
+        # TP group. For a MoE draft _draft_context is a nullcontext (the draft
+        # MoE needs the global group for its DP gather), so this has to be one
+        # too -- running it under attn_tp_group instead reduces over a different
+        # width and corrupts the logits (accept rate -> 0).
+        if self._draft_dp_context_enabled:
             return draft_tp_context(get_parallel().attn_tp_group)
         return nullcontext()
 

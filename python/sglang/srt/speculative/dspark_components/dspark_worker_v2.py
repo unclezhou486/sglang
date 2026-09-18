@@ -311,6 +311,7 @@ class DSparkWorkerV2(BaseSpecWorker):
             draft_block_spec_info=self._draft_block_spec_info,
             tp_sync=self._tp_sync,
             dp_moe_sync=self._draft_is_moe and get_parallel().enable_dp_attention,
+            draft_dp_context_enabled=self._draft_dp_context_enabled,
         )
         self._verify_epilogue = None
         if (
