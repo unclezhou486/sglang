@@ -1,5 +1,5 @@
 import logging
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Callable, Optional, Protocol, runtime_checkable
 
@@ -12,10 +12,6 @@ from sglang.srt.configs.hybrid_arch import mambaish_config
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.environ import envs
 from sglang.srt.layers.logprob_processor import compute_spec_logprobs
-from sglang.srt.layers.moe.utils import (
-    speculative_moe_a2a_backend_context,
-    speculative_moe_backend_context,
-)
 from sglang.srt.lora.layers import unwrap_lora_layer
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.scheduler import GenerationBatchResult
@@ -29,7 +25,6 @@ from sglang.srt.model_executor.forward_batch_info import (
 from sglang.srt.runtime_context import (
     get_disagg,
     get_exec,
-    get_flags,
     get_parallel,
     get_schedule,
     get_spec,
@@ -160,9 +155,11 @@ class DSparkWorkerV2(BaseSpecWorker):
             and not self._is_pd_prefill
         )
         # NOTE: upstream enforces attn_tp == 1 here for a MoE (DeepSeek-V4)
-        # draft. It is disabled on this branch so the attn_tp > 1 divergence can
-        # be reproduced and instrumented; see dspark_numeric_dump. Restore the
-        # raise before merging.
+        # draft, warning that attn_tp > 1 corrupts the MoE-under-DP all-reduce.
+        # That corruption was the draft attention's wo_b all-reducing over
+        # get_tp_group() (the full DP x TP group) instead of the attn-TP group;
+        # it is fixed in DSparkAttention. Keep this raise disabled until the
+        # fix is validated broadly, then remove it (or relax it to a warning).
         # if (
         #     get_parallel().enable_dp_attention
         #     and self._draft_is_moe
@@ -311,7 +308,6 @@ class DSparkWorkerV2(BaseSpecWorker):
             draft_block_spec_info=self._draft_block_spec_info,
             tp_sync=self._tp_sync,
             dp_moe_sync=self._draft_is_moe and get_parallel().enable_dp_attention,
-            draft_dp_context_enabled=self._draft_dp_context_enabled,
         )
         self._verify_epilogue = None
         if (
@@ -403,26 +399,10 @@ class DSparkWorkerV2(BaseSpecWorker):
             raise AttributeError(name)
         return getattr(self.target_worker, name)
 
-    @contextmanager
     def _draft_context(self):
-        """Context the draft runs under.
-
-        Besides the draft's TP group, layer in the speculative MoE backend / A2A
-        backend selection (upstream #31868) -- but ONLY when the config actually
-        declares one. get_speculative_moe_a2a_backend() silently falls back to
-        NONE when --speculative-moe-a2a-backend is unset, and applying that would
-        make the draft run a different MoE backend than the target, which
-        destroys the draft proposals (accept rate -> 0).
-        """
-        with ExitStack() as stack:
-            if self._draft_dp_context_enabled:
-                stack.enter_context(draft_tp_context(get_parallel().attn_tp_group))
-            moe = get_flags().moe
-            if moe.speculative_runner_backend is not None:
-                stack.enter_context(speculative_moe_backend_context())
-            if moe.speculative_a2a_backend is not None:
-                stack.enter_context(speculative_moe_a2a_backend_context())
-            yield
+        if self._draft_dp_context_enabled:
+            return draft_tp_context(get_parallel().attn_tp_group)
+        return nullcontext()
 
     def alloc_memory_pool(
         self,
@@ -695,12 +675,11 @@ class DSparkWorkerV2(BaseSpecWorker):
         if batch.forward_mode.is_idle():
             self._observers.note_idle_decode_step()
             if get_parallel().enable_dp_attention:
-                with self._draft_context():
-                    if self._draft_is_moe:
-                        self._proposer.run_idle_participation(batch)
-                    self._verify_executor.run_idle_participation(
-                        batch=batch, idle_layout=self._idle_verify_ragged_layout(batch)
-                    )
+                if self._draft_is_moe:
+                    self._proposer.run_idle_participation(batch)
+                self._verify_executor.run_idle_participation(
+                    batch=batch, idle_layout=self._idle_verify_ragged_layout(batch)
+                )
             return self._decode_idle_result(on_publish=on_publish)
 
         batch.seq_lens.record_stream(
@@ -832,27 +811,6 @@ class DSparkWorkerV2(BaseSpecWorker):
 
         epilogue = self._verify_executor.verify_epilogue
         folded_accept = fold_eligible and run_compact and can_run_cuda_graph
-        from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
-            attn_tp_group,
-            dump,
-        )
-
-        # D9: draft's first proposal vs the target's argmax at the anchor, both
-        # from THIS run, so the comparison is meaningful (unlike cross-run
-        # comparisons, which the draft's stochastic sampling invalidates).
-        _tl3 = logits_output.next_token_logits.view(
-            bs, self.verify_num_draft_tokens, -1
-        )
-        _tgt_anchor = _tl3[:, 0, :].argmax(dim=-1)
-        _draft0 = draft_tokens[:, 0].to(torch.int64)
-        dump("D9_draft0", _draft0.float(), attn_tp_group())
-        dump("D9b_target_anchor_argmax", _tgt_anchor.float(), attn_tp_group())
-        dump(
-            "D9c_draft0_eq_target_anchor",
-            (_draft0 == _tgt_anchor).float(),
-            attn_tp_group(),
-        )
-        dump("D7_verify_target_logits", logits_output.next_token_logits, attn_tp_group())
         accept = self._verify_executor.accept_and_finalize(
             folded_accept=folded_accept,
             bs=bs,
@@ -865,7 +823,6 @@ class DSparkWorkerV2(BaseSpecWorker):
             prefix_lens=prefix_lens,
             draft_tokens=draft_tokens,
         )
-        dump("D8_verify_correct_len", accept.correct_len.float(), attn_tp_group())
         if batch.return_logprob:
             compute_spec_logprobs(
                 batch,

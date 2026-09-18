@@ -117,12 +117,12 @@ class DSparkAttention(MqaAttentionBase):
             wo_a_keeps_quant_config=False,
             # Mirror MQALayer: let MqaAttentionBase pick reduce_results from
             # (attn_tp_size == tp_size), and do the attn-TP reduce explicitly in
-            # forward() below. Hard-coding True here made RowParallelLinear
-            # all-reduce wo_b over get_tp_group() -- i.e. over the WHOLE DP x TP
-            # group -- while its weight is sharded by attn_tp_size only. Under
-            # DP attention (attn_tp_size < tp_size) that sums the partial
-            # outputs of different DP ranks' *different* batches, corrupting the
-            # draft attention output (accept rate -> 0).
+            # forward() below. Hard-coding True made RowParallelLinear all-reduce
+            # wo_b over get_tp_group() -- the whole DP x TP group -- while its
+            # weight is sharded by attn_tp_size only. Under DP attention
+            # (attn_tp_size < tp_size) that summed the partial outputs of
+            # different DP ranks' different batches, corrupting the draft
+            # attention output (accept rate -> 0).
             rope_original_seq_len=0,
         )
         assert self.compress_ratio == 0, (
@@ -442,29 +442,6 @@ class DSparkV4MarkovHead(nn.Module):
             num_embeddings_per_partition=per_partition,
             num_embeddings_padded=num_padded,
         )
-        if envs.SGLANG_DSPARK_NUMERIC_DUMP.get():
-            _parallel = get_parallel()
-            _lm_head_rank = (
-                _parallel.attn_tp_rank
-                if getattr(lm_head, "use_attn_tp_group", False)
-                else _parallel.tp_rank
-            )
-            logger.warning(
-                "DSPARK_SHARD vocab=%d tp_size=%d per_partition=%d num_padded=%d "
-                "org_vocab=[%d,%d) shard_group=%s(size=%d) lm_head_rank=%d "
-                "attn_tp_rank=%d markov_w2_rows=%d",
-                self.vocab_size,
-                tp_size,
-                per_partition,
-                num_padded,
-                self._tp_shard.org_vocab_start,
-                self._tp_shard.org_vocab_end,
-                getattr(shard_group, "unique_name", "?"),
-                shard_group_size,
-                int(_lm_head_rank),
-                _parallel.attn_tp_rank,
-                int(self.markov_w2.weight.shape[0]),
-            )
 
     def get_prev_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.markov_w1(token_ids.long())
@@ -514,12 +491,6 @@ class DSparkV4MarkovHead(nn.Module):
             full = self._shard_group.all_gather(step_local, dim=-1)
         else:
             full = step_local
-        if self._shard_group is not None:
-            from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
-                dump,
-            )
-
-            dump("D5_draft_step_logits_full", full, self._shard_group)
         return full[..., : self.vocab_size]
 
     def forward(self, token_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -573,16 +544,6 @@ def build_dspark_v4_confidence_head(
     )
 
 
-def _dump_numeric(tag: str, t: torch.Tensor) -> None:
-    """Debug-only per-rank fingerprint; see dspark_numeric_dump."""
-    from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
-        attn_tp_group,
-        dump,
-    )
-
-    dump(tag, t, attn_tp_group())
-
-
 class DSparkV4Stage(DeepseekV4DecoderLayer):
     def __init__(
         self,
@@ -603,10 +564,6 @@ class DSparkV4Stage(DeepseekV4DecoderLayer):
             is_nextn=True,
             alt_streams=alt_streams,
         )
-        # DSpark draft expert weights follow the target model's global expert
-        # placement, so logical expert ids must be mapped to physical slots at
-        # runtime as well. Other nextn/MTP users retain the legacy behavior.
-        self.mlp.enable_nextn_expert_location_dispatch()
         self.stage_id = stage_id
         self.dim = config.hidden_size
 
@@ -683,7 +640,6 @@ class DSparkV4Stage(DeepseekV4DecoderLayer):
         x = self.input_layernorm(x)
         with self.self_attn.maybe_use_decode_attn_tp(forward_batch):
             x = self.self_attn(positions, x, forward_batch)
-        _dump_numeric("D1_draft_attn_out", x)
         x = self._hc_post_block(x, residual, post, comb)
 
         residual = x
@@ -701,7 +657,6 @@ class DSparkV4Stage(DeepseekV4DecoderLayer):
         y = self._run_moe_ffn_dp_sync(
             x, forward_batch, input_ids=None, input_ids_global=None
         )
-        _dump_numeric("D2_draft_moe_out", y)
         return y.view(shape)
 
 

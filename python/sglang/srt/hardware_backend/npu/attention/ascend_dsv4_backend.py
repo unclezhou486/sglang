@@ -1026,20 +1026,6 @@ class DeepseekV4AscendAttnBackend(
             swa_window=self._dsv4_sliding_window_size,
             page_index_aligned_size=128,
         )
-        # D12: the physical SWA slots the draft ATTENTION reads, plus the full
-        # loc it derived them from. Compare with D11 (the slots the injection
-        # WROTE) to see whether the read and the write disagree.
-        from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
-            attn_tp_group,
-            dump,
-        )
-
-        dump(
-            "D12_read_out_loc",
-            out_cache_loc[:expected_tokens].float(),
-            attn_tp_group(),
-        )
-        dump("D12b_sparse_indices", ori_sparse_indices.float(), attn_tp_group())
         return ori_sparse_indices
 
     def _init_dsv4_graph_buffers(self, *, max_bs: int, max_num_tokens: int) -> None:

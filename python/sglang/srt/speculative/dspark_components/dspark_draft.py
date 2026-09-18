@@ -23,10 +23,6 @@ from sglang.srt.runtime_context import get_parallel
 from sglang.srt.speculative.dflash_info_v2 import DFlashDraftInputV2
 from sglang.srt.speculative.draft_worker_common import make_draft_input_v2
 from sglang.srt.speculative.dspark_components.dspark_planner import VerifyWindow
-from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
-    attn_tp_group,
-    dump,
-)
 from sglang.srt.speculative.spec_info import (
     SpeculativeAlgorithm,
     spec_scale_global_num_tokens,
@@ -215,7 +211,6 @@ class DraftBlockProposer:
         draft_block_spec_info,
         tp_sync: SpecTpSync,
         dp_moe_sync: bool = False,
-        draft_dp_context_enabled: bool = False,
     ) -> None:
         self.draft_model = draft_model
         self.draft_model_runner = draft_model_runner
@@ -227,9 +222,6 @@ class DraftBlockProposer:
         self._tp_sync = tp_sync
         self._draft_sampler = None
         self._dp_moe_sync = dp_moe_sync
-        # Mirrors DSparkWorkerV2._draft_dp_context_enabled so _base_logits_context
-        # uses the same TP group as the draft forward.
-        self._draft_dp_context_enabled = draft_dp_context_enabled
         # Persistent (bs, gamma) mask-token buffer: only column 0 (the bonus
         # token) changes per step, so avoid a fresh torch.full every decode.
         self._draft_block_ids_buf: Optional[torch.Tensor] = None
@@ -243,13 +235,7 @@ class DraftBlockProposer:
         self._draft_sampler = draft_sampler
 
     def _base_logits_context(self):
-        # compute_base_logits consumes fwd.raw_hidden, which was produced under
-        # the draft forward's context (_draft_context), so it MUST use the same
-        # TP group. For a MoE draft _draft_context is a nullcontext (the draft
-        # MoE needs the global group for its DP gather), so this has to be one
-        # too -- running it under attn_tp_group instead reduces over a different
-        # width and corrupts the logits (accept rate -> 0).
-        if self._draft_dp_context_enabled:
+        if self._dp_moe_sync:
             return draft_tp_context(get_parallel().attn_tp_group)
         return nullcontext()
 
@@ -288,8 +274,8 @@ class DraftBlockProposer:
         folded = False
         # The folded proposal samples inside the captured draft graph. With
         # attn_tp_size > 1 the markov head's vocab-shard all-gather runs inside
-        # that graph and the sampled tokens come out wrong (accept rate ~0), so
-        # fall back to the eager markov path there.
+        # that graph; keep the eager markov path there until the in-graph gather
+        # is verified under attn_tp > 1.
         if (
             envs.SGLANG_DSPARK_FOLDED_PROPOSAL.get()
             and get_parallel().attn_tp_size == 1
@@ -331,11 +317,6 @@ class DraftBlockProposer:
                 greedy_mask=greedy_mask,
                 temperatures=temperatures,
             )
-            dump(
-                "D4b_draft_tokens_folded",
-                draft_block.draft_tokens.float(),
-                attn_tp_group(),
-            )
             if draft_sampler.confidence_out is not None:
                 folded_confidence = draft_sampler.confidence_out[:bs]
         else:
@@ -344,7 +325,6 @@ class DraftBlockProposer:
                     fwd.raw_hidden
                 )
                 base_logits = base_logits.view(bs, self.gamma, -1)
-            dump("D4_draft_base_logits", base_logits, attn_tp_group())
             draft_block = sample_draft_block(
                 base_logits=base_logits,
                 anchor_tokens=draft_block_ids[:, 0],
@@ -473,7 +453,6 @@ class DraftBlockProposer:
             draft_out = self.draft_model_runner.forward(draft_forward_batch)
         logits_output = draft_out.logits_output
         raw_hidden = logits_output.hidden_states
-        dump("D3_draft_raw_hidden", raw_hidden, attn_tp_group())
         if raw_hidden is None:
             raise RuntimeError("DSpark draft model returned no hidden states.")
         if self.sample_from_anchor:

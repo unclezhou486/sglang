@@ -857,17 +857,7 @@ def _dp_gather(
                 global_tokens, local_tokens, forward_batch, is_partial, _gatherv_sizes
             )
             return
-    if get_attn_tensor_model_parallel_world_size() > 1:
-        # attn_tp > 1: the attention output is REPLICATED across the attention-TP
-        # group, so the gather must not SUM the replicas. _dp_gather_via_all_gather
-        # is the path written for that (only attn_tp_rank 0 contributes; then
-        # reduce_scatter over attn_tp + all_gather over tp), and it does not
-        # depend on dp_padding_mode. Routing MAX_LEN vs SUM_LEN to different
-        # collectives here can wedge the ranks when their padding modes disagree.
-        _dp_gather_via_all_gather(
-            global_tokens, local_tokens, forward_batch, is_partial
-        )
-    elif (
+    if (
         forward_batch.dp_padding_mode is not None
         and forward_batch.dp_padding_mode.is_max_len()
     ):

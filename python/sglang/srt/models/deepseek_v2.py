@@ -588,11 +588,6 @@ class DeepseekV2MoE(nn.Module):
         self.layer_id = layer_id
         self.alt_stream = alt_stream
         self.is_nextn = is_nextn
-        # Keep the existing MTP/nextn behavior by default. DSpark explicitly
-        # opts in because its draft expert weights are loaded with the global
-        # expert-location mapping and therefore need the same mapping at
-        # dispatch time.
-        self._nextn_expert_location_dispatch_enabled = False
 
         n_hash_layers = getattr(config, "num_hash_layers", 0)
         self.is_hash = layer_id < n_hash_layers and not (is_deepseek_v4 and is_nextn)
@@ -876,12 +871,6 @@ class DeepseekV2MoE(nn.Module):
             and not get_exec().moe.enable_eplb
         )
 
-    def enable_nextn_expert_location_dispatch(self) -> None:
-        self._nextn_expert_location_dispatch_enabled = True
-
-    def _should_use_expert_location_dispatch(self) -> bool:
-        return not self.is_nextn or self._nextn_expert_location_dispatch_enabled
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -962,10 +951,7 @@ class DeepseekV2MoE(nn.Module):
         )
         dispatch_info = (
             ExpertLocationDispatchInfo.init_new(layer_id=self.layer_id)
-            if (
-                get_exec().moe.enable_eplb
-                and self._should_use_expert_location_dispatch()
-            )
+            if get_exec().moe.enable_eplb and not self.is_nextn
             else None
         )
         # router_logits: (num_tokens, n_experts)
@@ -1065,10 +1051,7 @@ class DeepseekV2MoE(nn.Module):
             return self.forward_cpu(hidden_states)
         dispatch_info = (
             ExpertLocationDispatchInfo.init_new(layer_id=self.layer_id)
-            if (
-                get_exec().moe.enable_eplb
-                and self._should_use_expert_location_dispatch()
-            )
+            if get_exec().moe.enable_eplb and not self.is_nextn
             else None
         )
         defer_shared = not self.experts.moe_runner_config.inplace
@@ -1298,7 +1281,7 @@ class DeepseekV2MoE(nn.Module):
                     ExpertLocationDispatchInfo.init_new(
                         layer_id=self.layer_id,
                     )
-                    if self._should_use_expert_location_dispatch()
+                    if not self.is_nextn
                     else None
                 ),
                 **topk_kwargs,
@@ -1653,7 +1636,7 @@ class DeepseekV2MoE(nn.Module):
                         ExpertLocationDispatchInfo.init_new(
                             layer_id=self.layer_id,
                         )
-                        if self._should_use_expert_location_dispatch()
+                        if not self.is_nextn
                         else None
                     ),
                     **topk_kwargs,
