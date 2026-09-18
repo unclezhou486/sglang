@@ -8,9 +8,9 @@ can be diffed against a working ``attn_tp_size == 1`` run.
 To keep the log small, set ``SGLANG_DSPARK_NUMERIC_DUMP_SPREAD_MIN`` (only lines
 whose spread reaches it are printed) and/or ``..._ONCE=1`` (each tag once).
 
-Every dump point must be reached by *all* ranks of the group (the group gather is
-a collective). The helpers here swallow their own exceptions so debug code can
-never break the forward.
+Every dump point must be reached by *all* ranks of the group. The group gather is
+issued unconditionally once a ``group`` is given (a None/empty tensor is encoded
+as a zero fingerprint) so no rank can skip the collective and wedge the others.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def _fingerprint(t: torch.Tensor) -> torch.Tensor:
 def dump(tag: str, t: Optional[torch.Tensor], group=None) -> None:
     """Log a fingerprint of ``t``; gather every rank's when ``group`` is given."""
     global _count
-    if t is None or not enabled():
+    if not enabled():
         return
     allowed = _tags()
     if allowed is not None and tag not in allowed:
@@ -74,10 +74,26 @@ def dump(tag: str, t: Optional[torch.Tensor], group=None) -> None:
     if limit and _count >= limit:
         return
     _count += 1
+
+    # Fingerprint locally; on failure fall back to a zero vector so the
+    # collective below is still issued by every rank.
+    fp = None
+    if t is not None:
+        try:
+            fp = _fingerprint(t)
+        except Exception as e:  # pragma: no cover - debug path must never raise
+            logger.warning("DSPARK_DUMP %s fingerprint failed: %s", tag, e)
+
     try:
-        fp = _fingerprint(t)
-        shape = tuple(t.shape)
         if group is not None and group.world_size > 1:
+            if fp is None:
+                try:
+                    device = torch.device("cuda", torch.cuda.current_device())
+                except Exception:
+                    device = torch.device("cpu")
+                fp = torch.zeros(_FP_WIDTH, dtype=torch.float64, device=device)
+            # NOTE: the gather is intentionally NOT inside a broad try/except —
+            # every rank must issue it.
             gathered = group.all_gather(fp).reshape(group.world_size, _FP_WIDTH)
             means = gathered[:, 0]
             absmaxes = gathered[:, 4]
@@ -88,29 +104,30 @@ def dump(tag: str, t: Optional[torch.Tensor], group=None) -> None:
                 return
             _seen.add(tag)
             worst = int((means - means.mean()).abs().argmax())
-            logger.warning(
-                "DSPARK_DUMP %s shape=%s dtype=%s spread=%.3e "
-                "(mean_spread=%.3e absmax_spread=%.3e worst_rank=%d "
-                "mean=[%.5e,%.5e] absmax=[%.3e,%.3e])",
-                tag,
-                shape,
-                t.dtype,
-                spread,
-                mean_spread,
-                absmax_spread,
-                worst,
-                float(means.min()),
-                float(means.max()),
-                float(absmaxes.min()),
-                float(absmaxes.max()),
-            )
-        else:
+            if group.rank_in_group == 0:
+                logger.warning(
+                    "DSPARK_DUMP %s shape=%s dtype=%s spread=%.3e "
+                    "(mean_spread=%.3e absmax_spread=%.3e worst_rank=%d "
+                    "mean=[%.5e,%.5e] absmax=[%.3e,%.3e])",
+                    tag,
+                    None if t is None else tuple(t.shape),
+                    None if t is None else t.dtype,
+                    spread,
+                    mean_spread,
+                    absmax_spread,
+                    worst,
+                    float(means.min()),
+                    float(means.max()),
+                    float(absmaxes.min()),
+                    float(absmaxes.max()),
+                )
+        elif fp is not None:
             _seen.add(tag)
             logger.warning(
                 "DSPARK_DUMP %s shape=%s dtype=%s mean=%.5e std=%.3e "
                 "min=%.3e max=%.3e absmax=%.3e sum=%.5e",
                 tag,
-                shape,
+                tuple(t.shape),
                 t.dtype,
                 fp[0].item(),
                 fp[1].item(),
@@ -119,7 +136,7 @@ def dump(tag: str, t: Optional[torch.Tensor], group=None) -> None:
                 fp[4].item(),
                 fp[5].item(),
             )
-    except Exception as e:  # pragma: no cover - debug path must never raise
+    except Exception as e:  # pragma: no cover - logging must never break the forward
         logger.warning("DSPARK_DUMP %s failed: %s", tag, e)
 
 
