@@ -276,8 +276,13 @@ class DraftBlockProposer:
         folded_confidence = None
         confidence_tap = None
         folded = False
+        # The folded proposal samples inside the captured draft graph. With
+        # attn_tp_size > 1 the markov head's vocab-shard all-gather runs inside
+        # that graph and the sampled tokens come out wrong (accept rate ~0), so
+        # fall back to the eager markov path there.
         if (
             envs.SGLANG_DSPARK_FOLDED_PROPOSAL.get()
+            and get_parallel().attn_tp_size == 1
             and draft_sampler is not None
             and fwd.can_run_graph
             and (all_greedy or draft_sampler.folded_sampling)
