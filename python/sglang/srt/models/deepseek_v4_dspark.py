@@ -498,6 +498,10 @@ class DSparkV4MarkovHead(nn.Module):
         else:
             full = step_local
         if self._shard_group is not None:
+            from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
+                dump,
+            )
+
             dump("D5_draft_step_logits_full", full, self._shard_group)
         return full[..., : self.vocab_size]
 
