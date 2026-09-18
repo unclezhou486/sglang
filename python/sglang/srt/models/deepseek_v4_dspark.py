@@ -18,7 +18,10 @@ from sglang.kernels.ops.speculative.dspark.dspark_draft_model import (
 )
 from sglang.srt.configs.deepseek_v4 import DeepSeekV4Config
 from sglang.srt.environ import envs
-from sglang.srt.layers.dp_attention import is_dp_attention_enabled
+from sglang.srt.layers.dp_attention import (
+    attn_tp_all_reduce,
+    is_dp_attention_enabled,
+)
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.moe.utils import is_shared_experts_fusion_disabled
@@ -112,7 +115,14 @@ class DSparkAttention(MqaAttentionBase):
             fuse_wqa_wkv=False,
             wo_a_fp8=False,
             wo_a_keeps_quant_config=False,
-            wo_b_reduce_results=True,
+            # Mirror MQALayer: let MqaAttentionBase pick reduce_results from
+            # (attn_tp_size == tp_size), and do the attn-TP reduce explicitly in
+            # forward() below. Hard-coding True here made RowParallelLinear
+            # all-reduce wo_b over get_tp_group() -- i.e. over the WHOLE DP x TP
+            # group -- while its weight is sharded by attn_tp_size only. Under
+            # DP attention (attn_tp_size < tp_size) that sums the partial
+            # outputs of different DP ranks' *different* batches, corrupting the
+            # draft attention output (accept rate -> 0).
             rope_original_seq_len=0,
         )
         assert self.compress_ratio == 0, (
@@ -340,6 +350,13 @@ class DSparkAttention(MqaAttentionBase):
         else:
             o = torch.einsum("bgd,grd->bgr", o.float(), wo_a.float()).to(q.dtype)
         out, _ = self.wo_b(o.reshape(o.shape[0], o.shape[1] * o.shape[2]))
+        # wo_b is row-parallel over attn_tp_size, but its own reduce (when
+        # reduce_results is on) runs over get_tp_group(), which is wider than the
+        # attn-TP group under DP attention. Reduce over the attn-TP group instead,
+        # exactly like MqaAttentionBase.forward. When attn_tp_size == tp_size the
+        # wo_b reduce already used the (== attn-TP) group, so this is a no-op.
+        if self.attn_tp_size > 1 and self.attn_tp_size < get_parallel().tp_size:
+            out = attn_tp_all_reduce(out)
         return out
 
 
