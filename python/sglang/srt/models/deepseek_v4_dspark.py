@@ -426,9 +426,15 @@ class DSparkV4MarkovHead(nn.Module):
             num_embeddings_padded=num_padded,
         )
         if envs.SGLANG_DSPARK_NUMERIC_DUMP.get():
+            _parallel = get_parallel()
+            _lm_head_rank = (
+                _parallel.attn_tp_rank
+                if getattr(lm_head, "use_attn_tp_group", False)
+                else _parallel.tp_rank
+            )
             logger.warning(
                 "DSPARK_SHARD vocab=%d tp_size=%d per_partition=%d num_padded=%d "
-                "org_vocab=[%d,%d) shard_group=%s(size=%d) lm_head.tp_rank=%d "
+                "org_vocab=[%d,%d) shard_group=%s(size=%d) lm_head_rank=%d "
                 "attn_tp_rank=%d markov_w2_rows=%d",
                 self.vocab_size,
                 tp_size,
@@ -438,8 +444,8 @@ class DSparkV4MarkovHead(nn.Module):
                 self._tp_shard.org_vocab_end,
                 getattr(shard_group, "unique_name", "?"),
                 shard_group_size,
-                int(lm_head.tp_rank),
-                get_parallel().attn_tp_rank,
+                int(_lm_head_rank),
+                _parallel.attn_tp_rank,
                 int(self.markov_w2.weight.shape[0]),
             )
 
