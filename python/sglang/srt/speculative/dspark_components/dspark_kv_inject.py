@@ -133,21 +133,6 @@ class TargetHiddenKvInjector:
                     committed_mask, swa_loc, torch.full_like(swa_loc, -1)
                 )
 
-        # D10: the draft only sees the injected target hidden, so dump the write
-        # locations (and the -1 fraction) plus the hidden fingerprint.
-        from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
-            attn_tp_group,
-            dump,
-        )
-
-        dump("D10_inject_swa_loc", swa_loc.float(), attn_tp_group())
-        dump(
-            "D10b_inject_frac_neg1",
-            (swa_loc < 0).float(),
-            attn_tp_group(),
-        )
-        dump("D10c_inject_target_hidden", target_hidden, attn_tp_group())
-
         with torch.inference_mode():
             self.draft_model.write_target_hidden_kv(
                 main_hidden=target_hidden,
@@ -183,6 +168,18 @@ class TargetHiddenKvInjector:
         win = pool.unified_swa_window
         pos = positions.to(torch.int64)
         loc = state_slot.to(torch.int64) * ring + pos % ring
+        # D11: the RAW ring mapping BEFORE the window/commit masks. If
+        # loc == state_slot*ring + pos%ring holds with sane values, the
+        # injection is fine and the bug is in the draft forward instead.
+        from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
+            attn_tp_group,
+            dump,
+        )
+
+        dump("D11_raw_loc", loc.float(), attn_tp_group())
+        dump("D11b_positions", pos.float(), attn_tp_group())
+        dump("D11c_state_slot", state_slot.float(), attn_tp_group())
+        dump("D11d_ring", torch.full_like(pos[:1], float(ring)).float(), None)
         if final_pos is not None:
             keep = pos > (final_pos.to(torch.int64) - win)
             loc = torch.where(keep, loc, torch.full_like(loc, -1))
