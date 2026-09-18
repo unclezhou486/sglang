@@ -534,6 +534,15 @@ class Envs:
     SGLANG_DSPARK_DEBUG_CONFIDENCE_PREFIX_SCHEDULER = EnvBool(False)
     SGLANG_DSPARK_DEBUG_CONFIDENCE_METRICS = EnvBool(False)
     SGLANG_DSPARK_DEBUG_DUMP = EnvTuple(tuple())
+    # Reference/debug path: log a per-rank numeric fingerprint of the DSpark
+    # draft forward (attention output, MoE output, raw hidden, base logits) so a
+    # run with attn_tp_size > 1 can be compared against attn_tp_size == 1.
+    # Never enable in production; it adds collectives and host syncs.
+    SGLANG_DSPARK_NUMERIC_DUMP = EnvBool(False)
+    # Max dumps per process (0 = unlimited).
+    SGLANG_DSPARK_NUMERIC_DUMP_MAX = EnvInt(200)
+    # Comma-separated tag allowlist; empty = all tags.
+    SGLANG_DSPARK_NUMERIC_DUMP_TAGS = EnvStr("")
     SGLANG_DSPARK_LOG_SPS_PRED_INTERVAL = EnvInt(0)
     SGLANG_DSPARK_STS_COLLECT_PATH = EnvStr("")
     SGLANG_DSPARK_BLOCK_ACCEPT_ESTIMATE_PATH = EnvStr("")

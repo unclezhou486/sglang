@@ -23,6 +23,10 @@ from sglang.srt.runtime_context import get_parallel
 from sglang.srt.speculative.dflash_info_v2 import DFlashDraftInputV2
 from sglang.srt.speculative.draft_worker_common import make_draft_input_v2
 from sglang.srt.speculative.dspark_components.dspark_planner import VerifyWindow
+from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
+    attn_tp_group,
+    dump,
+)
 from sglang.srt.speculative.spec_info import (
     SpeculativeAlgorithm,
     spec_scale_global_num_tokens,
@@ -312,6 +316,11 @@ class DraftBlockProposer:
                 greedy_mask=greedy_mask,
                 temperatures=temperatures,
             )
+            dump(
+                "D4b_draft_tokens_folded",
+                draft_block.draft_tokens.float(),
+                attn_tp_group(),
+            )
             if draft_sampler.confidence_out is not None:
                 folded_confidence = draft_sampler.confidence_out[:bs]
         else:
@@ -320,6 +329,7 @@ class DraftBlockProposer:
                     fwd.raw_hidden
                 )
                 base_logits = base_logits.view(bs, self.gamma, -1)
+            dump("D4_draft_base_logits", base_logits, attn_tp_group())
             draft_block = sample_draft_block(
                 base_logits=base_logits,
                 anchor_tokens=draft_block_ids[:, 0],
@@ -448,6 +458,7 @@ class DraftBlockProposer:
             draft_out = self.draft_model_runner.forward(draft_forward_batch)
         logits_output = draft_out.logits_output
         raw_hidden = logits_output.hidden_states
+        dump("D3_draft_raw_hidden", raw_hidden, attn_tp_group())
         if raw_hidden is None:
             raise RuntimeError("DSpark draft model returned no hidden states.")
         if self.sample_from_anchor:

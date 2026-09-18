@@ -527,6 +527,16 @@ def build_dspark_v4_confidence_head(
     )
 
 
+def _dump_numeric(tag: str, t: torch.Tensor) -> None:
+    """Debug-only per-rank fingerprint; see dspark_numeric_dump."""
+    from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
+        attn_tp_group,
+        dump,
+    )
+
+    dump(tag, t, attn_tp_group())
+
+
 class DSparkV4Stage(DeepseekV4DecoderLayer):
     def __init__(
         self,
@@ -623,6 +633,7 @@ class DSparkV4Stage(DeepseekV4DecoderLayer):
         x = self.input_layernorm(x)
         with self.self_attn.maybe_use_decode_attn_tp(forward_batch):
             x = self.self_attn(positions, x, forward_batch)
+        _dump_numeric("D1_draft_attn_out", x)
         x = self._hc_post_block(x, residual, post, comb)
 
         residual = x
@@ -640,6 +651,7 @@ class DSparkV4Stage(DeepseekV4DecoderLayer):
         y = self._run_moe_ffn_dp_sync(
             x, forward_batch, input_ids=None, input_ids_global=None
         )
+        _dump_numeric("D2_draft_moe_out", y)
         return y.view(shape)
 
 
