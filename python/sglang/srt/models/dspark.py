@@ -48,6 +48,16 @@ def project_through_lm_head(hidden: torch.Tensor, lm_head: nn.Module) -> torch.T
     return torch.matmul(hidden.to(weight.dtype), weight.T)
 
 
+def _dump_tokens(tag: str, t: torch.Tensor) -> None:
+    """Debug-only per-rank fingerprint of token ids; see dspark_numeric_dump."""
+    from sglang.srt.speculative.dspark_components.dspark_numeric_dump import (
+        attn_tp_group,
+        dump,
+    )
+
+    dump(tag, t.float(), attn_tp_group())
+
+
 def run_markov_block(
     head: nn.Module,
     base_logits: torch.Tensor,
@@ -77,8 +87,10 @@ def run_markov_block(
         if collect_corrected:
             corrected_logits.append(step_logits.unsqueeze(1))
         prev_tokens = next_tokens
+    sampled_tokens = torch.stack(sampled_tokens, dim=1)
+    _dump_tokens("D6_draft_sampled_tokens", sampled_tokens)
     return (
-        torch.stack(sampled_tokens, dim=1),
+        sampled_tokens,
         torch.cat(corrected_logits, dim=1) if collect_corrected else None,
     )
 

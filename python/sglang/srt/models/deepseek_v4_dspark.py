@@ -474,6 +474,8 @@ class DSparkV4MarkovHead(nn.Module):
             full = self._shard_group.all_gather(step_local, dim=-1)
         else:
             full = step_local
+        if self._shard_group is not None:
+            dump("D5_draft_step_logits_full", full, self._shard_group)
         return full[..., : self.vocab_size]
 
     def forward(self, token_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
