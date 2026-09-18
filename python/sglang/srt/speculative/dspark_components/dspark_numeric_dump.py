@@ -1,9 +1,12 @@
 """Per-rank numeric fingerprints for the DSpark draft forward.
 
 Debug/reference path only. Enable with ``SGLANG_DSPARK_NUMERIC_DUMP=1`` and read
-the ``DSPARK_DUMP`` log lines; they show the fingerprint of every rank in a
+the ``DSPARK_DUMP`` log lines; they show a compact fingerprint of every rank in a
 process group plus the cross-rank spread, so a failing ``attn_tp_size > 1`` run
 can be diffed against a working ``attn_tp_size == 1`` run.
+
+To keep the log small, set ``SGLANG_DSPARK_NUMERIC_DUMP_SPREAD_MIN`` (only lines
+whose spread reaches it are printed) and/or ``..._ONCE=1`` (each tag once).
 
 Every dump point must be reached by *all* ranks of the group (the group gather is
 a collective). The helpers here swallow their own exceptions so debug code can
@@ -24,6 +27,7 @@ logger = logging.getLogger(__name__)
 # 6 floats per rank: mean, std, min, max, absmax, sum.
 _FP_WIDTH = 6
 _count = 0
+_seen: set[str] = set()
 
 
 def enabled() -> bool:
@@ -64,6 +68,8 @@ def dump(tag: str, t: Optional[torch.Tensor], group=None) -> None:
         return
     if _capturing():
         return
+    if envs.SGLANG_DSPARK_NUMERIC_DUMP_ONCE.get() and tag in _seen:
+        return
     limit = int(envs.SGLANG_DSPARK_NUMERIC_DUMP_MAX.get())
     if limit and _count >= limit:
         return
@@ -74,21 +80,32 @@ def dump(tag: str, t: Optional[torch.Tensor], group=None) -> None:
         if group is not None and group.world_size > 1:
             gathered = group.all_gather(fp).reshape(group.world_size, _FP_WIDTH)
             means = gathered[:, 0]
-            spread = float(means.max() - means.min())
-            rows = " ".join(
-                f"r{i}(mean={v[0]:.5e},std={v[1]:.3e},absmax={v[4]:.3e})"
-                for i, v in enumerate(gathered)
+            absmaxes = gathered[:, 4]
+            mean_spread = float(means.max() - means.min())
+            absmax_spread = float(absmaxes.max() - absmaxes.min())
+            spread = max(mean_spread, absmax_spread)
+            if spread < float(envs.SGLANG_DSPARK_NUMERIC_DUMP_SPREAD_MIN.get()):
+                return
+            _seen.add(tag)
+            worst = int((means - means.mean()).abs().argmax())
+            logger.warning(
+                "DSPARK_DUMP %s shape=%s dtype=%s spread=%.3e "
+                "(mean_spread=%.3e absmax_spread=%.3e worst_rank=%d "
+                "mean=[%.5e,%.5e] absmax=[%.3e,%.3e])",
+                tag,
+                shape,
+                t.dtype,
+                spread,
+                mean_spread,
+                absmax_spread,
+                worst,
+                float(means.min()),
+                float(means.max()),
+                float(absmaxes.min()),
+                float(absmaxes.max()),
             )
-            if group.rank_in_group == 0:
-                logger.warning(
-                    "DSPARK_DUMP %s shape=%s dtype=%s mean_spread=%.3e | %s",
-                    tag,
-                    shape,
-                    t.dtype,
-                    spread,
-                    rows,
-                )
         else:
+            _seen.add(tag)
             logger.warning(
                 "DSPARK_DUMP %s shape=%s dtype=%s mean=%.5e std=%.3e "
                 "min=%.3e max=%.3e absmax=%.3e sum=%.5e",

@@ -543,6 +543,10 @@ class Envs:
     SGLANG_DSPARK_NUMERIC_DUMP_MAX = EnvInt(200)
     # Comma-separated tag allowlist; empty = all tags.
     SGLANG_DSPARK_NUMERIC_DUMP_TAGS = EnvStr("")
+    # Only log when the cross-rank spread reaches this value (0 = always).
+    SGLANG_DSPARK_NUMERIC_DUMP_SPREAD_MIN = EnvFloat(0.0)
+    # Log each tag at most once.
+    SGLANG_DSPARK_NUMERIC_DUMP_ONCE = EnvBool(False)
     SGLANG_DSPARK_LOG_SPS_PRED_INTERVAL = EnvInt(0)
     SGLANG_DSPARK_STS_COLLECT_PATH = EnvStr("")
     SGLANG_DSPARK_BLOCK_ACCEPT_ESTIMATE_PATH = EnvStr("")
