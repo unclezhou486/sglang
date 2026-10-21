@@ -89,6 +89,9 @@ command uses the daily build tag `main-cann9.1.0-a3`. Once the stable image is p
 release tag.
 For details, see [Docker image versions](/docs/hardware-platforms/ascend-npus/faq#8-docker-image-versions-stable-release-vs-daily-build).
 
+<Tabs>
+  <Tab title="Ascend A3 Series">
+
 {/* TODO: CANN 9.1.0 has no stable image yet, so this page temporarily references the daily build tag `main-cann9.1.0-a3`. Once the stable image is published, switch back to the stable release tag. */}
 ```bash Command
 # TODO: CANN 9.1.0 has no stable image yet, so this temporarily pulls the
@@ -124,6 +127,41 @@ docker run -itd --shm-size=16g --name ${NAME} \
 --entrypoint=bash \
 quay.io/ascend/sglang:main-cann9.1.0-a3
 ```
+
+</Tab>
+  <Tab title="Ascend A5 Series">
+
+
+{/* TODO: CANN 9.1.0 has no stable image yet, so this page temporarily references the daily build tag `main-cann9.1.0-950`. Once the stable image is published, switch back to the stable release tag. */}
+```bash Command
+# TODO: CANN 9.1.0 has no stable image yet, so this temporarily pulls the
+# daily build tag. Once the stable image is published, switch back to the
+# stable release tag.
+docker pull quay.io/ascend/sglang:main-cann9.1.0-950
+
+docker run -itd --shm-size=16g --name ${NAME} \
+--privileged=true --net=host \
+-v /var/queue_schedule:/var/queue_schedule \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /usr/local/sbin:/usr/local/sbin \
+-v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+-v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+--device=/dev/davinci0:/dev/davinci0  \
+--device=/dev/davinci1:/dev/davinci1  \
+--device=/dev/davinci2:/dev/davinci2  \
+--device=/dev/davinci3:/dev/davinci3  \
+--device=/dev/davinci4:/dev/davinci4  \
+--device=/dev/davinci5:/dev/davinci5  \
+--device=/dev/davinci6:/dev/davinci6  \
+--device=/dev/davinci7:/dev/davinci7  \
+--device=/dev/davinci_manager:/dev/davinci_manager \
+--device=/dev/hisi_hdc:/dev/hisi_hdc \
+--entrypoint=bash \
+quay.io/ascend/sglang:main-cann9.1.0-950
+```
+
+  </Tab>
+</Tabs>
 
 <Tip>
 - If the model weights have already been downloaded to a shared directory, use `-v` to mount the model path into the
