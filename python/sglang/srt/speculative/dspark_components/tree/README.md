@@ -42,6 +42,18 @@ layer is not vendored wholesale because it is coupled to vllm's runner, pool,
 and `MarkovScorer` model API; sglang's Markov head exposes
 `step_bias(prev_tokens, hidden_states, state)` instead.
 
+## Device-readiness (important)
+
+- `builder.py` and `acceptance.py` are tensor-vectorized and suitable for device
+  execution.
+- `metadata.py`, `sparse.py`, `output.py` and `commit.py` currently use
+  host-planning loops over small tensors. They are CPU-correct, but they must
+  not run inside a captured forward: before graph capture they need
+  tensorized/device-side variants (see vllm-ascend's
+  `native_attention._original_slots` and `triton/tree/node_pool.py`).
+- `plan_tree_round` is a host planner; call it per round outside the captured
+  region.
+
 ## Device-only boundaries (never faked)
 
 - Native tree attention: `torch.ops._C_ascend.npu_sparse_attn_sharedkv_tree`.
