@@ -19,6 +19,7 @@ from tree.attention import (
 )
 from tree.commit import TreeCommitPlan, apply_tree_commit, plan_tree_commit
 from tree.config import TreeConfig, resolve_tree_config
+from tree.round import TreeRoundPlan, plan_tree_round
 
 __all__ = [
     "TreeShape",
@@ -45,4 +46,6 @@ __all__ = [
     "apply_tree_commit",
     "TreeConfig",
     "resolve_tree_config",
+    "TreeRoundPlan",
+    "plan_tree_round",
 ]

@@ -19,6 +19,7 @@ blocks. This package imports only `torch` and `dataclasses`; it never imports
 | `attention.py` | Native op adapter + CPU reference (test-only). |
 | `commit.py` | Root/accepted-node commit plan + device hook boundary. |
 | `config.py` | Pure `resolve_tree_config` validation. |
+| `round.py` | One-call `plan_tree_round`: builder → metadata → sparse → accept → output → commit. |
 
 ## Contracts
 
