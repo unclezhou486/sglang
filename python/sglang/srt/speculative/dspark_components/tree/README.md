@@ -20,6 +20,7 @@ blocks. This package imports only `torch` and `dataclasses`; it never imports
 | `commit.py` | Root/accepted-node commit plan + device hook boundary. |
 | `config.py` | Pure `resolve_tree_config` validation. |
 | `round.py` | One-call `plan_tree_round`: builder → metadata → sparse → accept → output → commit. |
+| `node_pool.py` | DSV4 node KV pipeline: `compress_nodes` (`compressor_tree_project` + `compressor_tree`) and `attend_nodes` (`cmp_tree_kv`). Every node uses its own hidden row. |
 
 ## Contracts
 

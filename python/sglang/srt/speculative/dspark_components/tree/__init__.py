@@ -27,6 +27,12 @@ from tree.round import (
     plan_tree_pre,
     plan_tree_round,
 )
+from tree.node_pool import (
+    NodePlan,
+    attend_nodes,
+    build_node_plan,
+    compress_nodes,
+)
 
 __all__ = [
     "TreeShape",
@@ -59,4 +65,8 @@ __all__ = [
     "TreePostPlan",
     "plan_tree_pre",
     "plan_tree_post",
+    "NodePlan",
+    "build_node_plan",
+    "compress_nodes",
+    "attend_nodes",
 ]
