@@ -3,7 +3,38 @@
 import torch
 
 from tree.config import resolve_tree_config
-from tree.round import plan_tree_round
+from tree.round import plan_tree_post, plan_tree_pre, plan_tree_round
+
+
+def test_pre_post_split_matches_round():
+    cfg = resolve_tree_config(enable=True, topk=2, budget=4, depth=3)
+    base = torch.zeros(1, 3, 8)
+    kwargs = dict(
+        base_logits=base,
+        root_token_ids=torch.tensor([1]),
+        prefix_lens=torch.tensor([3]),
+        block_table=torch.tensor([[0, 1, 2, 3]]),
+        block_size=4,
+        window=4,
+        config=cfg,
+    )
+    pre = plan_tree_pre(**kwargs)
+    target = torch.zeros(1, 5, dtype=torch.long)
+    vloc = torch.arange(5).unsqueeze(0)
+    post = plan_tree_post(
+        pre=pre,
+        target_predict=target,
+        verify_cache_loc=vloc,
+        prefix_lens=torch.tensor([3]),
+        block_table=torch.tensor([[0, 1, 2, 3]]),
+        block_size=4,
+    )
+    combined = plan_tree_round(**kwargs, target_predict=target, verify_cache_loc=vloc)
+    assert torch.equal(pre.layout.tokens, combined.layout.tokens)
+    assert torch.equal(pre.layout.parents, combined.layout.parents)
+    assert torch.equal(pre.ori_sparse_indices, combined.ori_sparse_indices)
+    assert torch.equal(post.outputs.out_tokens, combined.outputs.out_tokens)
+    assert torch.equal(post.commit.source_rows, combined.commit.source_rows)
 
 
 def test_chain_round_matches_manual_pipeline():
