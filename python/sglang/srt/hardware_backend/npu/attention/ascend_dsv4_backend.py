@@ -959,7 +959,7 @@ class C4IndexerAscendBackendMixin:
             weights=weights,
             query_scale=q_scale,
             history=k,
-            history_scale=k_scale,
+            history_scale=k_scale.to(torch.float16),
             nodes=nodes,
             node_scale=node_scale,
             table=self.forward_metadata.c4_page_table,
