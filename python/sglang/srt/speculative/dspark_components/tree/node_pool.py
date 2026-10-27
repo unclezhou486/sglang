@@ -1,4 +1,4 @@
-"""DSV4 tree node KV pipeline (sglang port of vllm-ascend's node_pool.py).
+﻿"""DSV4 tree node KV pipeline (sglang port of vllm-ascend's node_pool.py).
 
 Per layer:
   hidden[T, H] -> compressor_tree_project -> nodes[n+1, ...]
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import torch
 
-from tree.attention import tree_attention, tree_attn_op_available
+from .attention import tree_attention, tree_attn_op_available
 
 
 @dataclass
@@ -171,3 +171,4 @@ def attend_nodes(
         ori_win_left=window - 1,
         ori_win_right=0,
     )
+

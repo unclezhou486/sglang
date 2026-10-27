@@ -79,6 +79,7 @@ from sglang.srt.speculative.dspark_components.dspark_sampling_accept_graph impor
     DsparkSamplingAcceptGraph,
 )
 from sglang.srt.speculative.dspark_components.dspark_verify import (
+    AcceptOuts,
     CommitInjectCtx,
     DsparkVerifyEpilogue,
     TargetVerifyExecutor,
@@ -86,6 +87,15 @@ from sglang.srt.speculative.dspark_components.dspark_verify import (
     target_uses_fused_argmax,
     verify_logits_adjustments_are_noop,
 )
+from sglang.srt.speculative.dspark_components.tree.commit import apply_tree_commit
+from sglang.srt.speculative.dspark_components.tree.config import (
+    resolve_tree_for_server,
+)
+from sglang.srt.speculative.dspark_components.tree.round import (
+    plan_tree_post,
+    plan_tree_pre,
+)
+from sglang.srt.speculative.dspark_components.tree.scoring import DSparkMarkovScorer
 from sglang.srt.speculative.spec_sampling_mask import (
     SpeculativeSamplingMaskCapture,
 )
@@ -269,6 +279,21 @@ class DSparkWorkerV2(BaseSpecWorker):
         self.query_token_num = self.gamma if self.sample_from_anchor else self.gamma + 1
         self.speculative_num_draft_tokens = self.verify_num_draft_tokens
         self._mask_token_id = runtime_config.mask_token_id
+        from sglang.srt.speculative.ragged_verify import read_ragged_verify_mode
+
+        self._tree_config = resolve_tree_for_server(
+            self.server_args,
+            gamma=self.gamma,
+            ragged_mode=read_ragged_verify_mode().value,
+        )
+        self._tree_sliding_window = int(
+            getattr(self.model_runner.model_config.hf_config, "sliding_window", 0)
+        )
+        if self._tree_config is not None and self._tree_sliding_window <= 0:
+            raise ValueError(
+                "DSpark tree mode requires hf_config.sliding_window; got "
+                f"{self._tree_sliding_window}."
+            )
 
         parallel = get_parallel()
         self._tp_sync = SpecTpSync(get_dp_tp_group())
@@ -1112,6 +1137,30 @@ class DSparkWorkerV2(BaseSpecWorker):
             if self.num_folded_verify_ids_steps == 1:
                 logger.info("Verify ids read from the draft graph output (first step).")
 
+        tree_pre = None
+        if self._tree_config is not None and self._tree_config.topk > 1:
+            if proposal.folded or proposal.base_logits is None:
+                raise RuntimeError(
+                    "DSpark tree requires the eager proposal with base_logits; "
+                    "disable the folded proposal."
+                )
+            page_table = self.model_runner.req_to_token_pool.req_to_token[
+                batch.req_pool_indices
+            ]
+            tree_pre = plan_tree_pre(
+                base_logits=proposal.base_logits,
+                root_token_ids=draft_block_ids[:, 0],
+                prefix_lens=prefix_lens,
+                block_table=page_table,
+                block_size=self.page_size,
+                window=self._tree_sliding_window,
+                config=self._tree_config,
+                scorer=DSparkMarkovScorer(
+                    self.draft_model.markov_head, self._tree_config.topk
+                ),
+            )
+            verify_ids_2d = tree_pre.metadata.verify_ids.reshape(bs, -1)
+
         # Must stay ahead of the target verify launch below.
         grammar_tree = (
             GrammarTree.from_linear_chain(verify_ids_2d) if batch.has_grammar else None
@@ -1172,9 +1221,27 @@ class DSparkWorkerV2(BaseSpecWorker):
                     verify_ids_2d=verify_ids_2d,
                     verify_window=verify_window,
                     sampling_info=sampling_info,
+                    tree_plan=tree_pre,
                 )
                 hidden_strided = None
         logits_output = target_verify.logits_output
+        tree_post = None
+        if tree_pre is not None:
+            page_table = self.model_runner.req_to_token_pool.req_to_token[
+                batch.req_pool_indices
+            ]
+            q_width = tree_pre.metadata.query_width
+            target_predict = logits_output.next_token_logits.argmax(-1).view(
+                bs, q_width
+            )
+            tree_post = plan_tree_post(
+                pre=tree_pre,
+                target_predict=target_predict,
+                verify_cache_loc=verify_window.verify_cache_loc,
+                prefix_lens=prefix_lens,
+                block_table=page_table,
+                block_size=self.page_size,
+            )
         can_run_cuda_graph = target_verify.can_run_cuda_graph
         if batch.has_grammar:
             # run_compact scatters its rows back to (bs * chain_len), so the mask
@@ -1213,7 +1280,17 @@ class DSparkWorkerV2(BaseSpecWorker):
         # The accept and its commits ran in a graph: the verify graph's fold or the
         # sampling-accept region replayed right after it.
         graph_accept = folded_accept or region_accept is not None
-        if region_accept is not None:
+        if tree_post is not None:
+            accept = AcceptOuts(
+                correct_len=tree_post.outputs.num_accepted,
+                bonus=tree_post.acceptance.bonus,
+                cap_trim_lens=torch.zeros_like(tree_post.outputs.num_accepted),
+                commit_lens=tree_post.commit.commit_lens,
+                new_seq_lens=tree_post.commit.new_seq_lens,
+                out_tokens=tree_post.outputs.out_tokens,
+            )
+            apply_tree_commit(tree_post.commit)
+        elif region_accept is not None:
             epilogue.note_static_verify(bs)
             accept = region_accept
         else:

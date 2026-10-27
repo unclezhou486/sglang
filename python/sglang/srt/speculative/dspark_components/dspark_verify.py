@@ -302,9 +302,12 @@ class TargetVerifyExecutor:
         verify_ids_2d: torch.Tensor,
         verify_window: VerifyWindow,
         sampling_info,
+        tree_plan=None,
     ) -> TargetVerifyResult:
         verify_w = self.verify_num_draft_tokens
         positions_2d = verify_window.positions_2d
+        if tree_plan is not None:
+            positions_2d = tree_plan.metadata.positions.reshape(verify_ids_2d.shape)
         verify_cache_loc = verify_window.verify_cache_loc
 
         verify_input = DFlashVerifyInput(
@@ -315,6 +318,7 @@ class TargetVerifyExecutor:
             capture_hidden_mode=CaptureHiddenMode.FULL,
             live_seq_lens_cpu=batch.seq_lens_cpu,
             kv_loc_plan=verify_window.kv_loc_plan,
+            tree_plan=tree_plan,
         )
         batch.out_cache_loc = verify_cache_loc
         seq_lens_cpu_backup = batch.seq_lens_cpu

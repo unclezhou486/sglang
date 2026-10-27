@@ -1,4 +1,4 @@
-"""Level-wise tree builder with ancestor-closed pruning.
+﻿"""Level-wise tree builder with ancestor-closed pruning.
 
 Adapted from vllm-ascend's tree/builder.py (Apache-2.0), torch path only.
 """
@@ -7,8 +7,8 @@ from dataclasses import dataclass
 
 import torch
 
-from tree.layout import TreeLayout, finalize_tree_layout_torch
-from tree.scoring import IndependentScorer
+from .layout import TreeLayout, finalize_tree_layout_torch
+from .scoring import IndependentScorer
 
 
 @dataclass
@@ -146,3 +146,4 @@ class TreeBuilder:
         return finalize_tree_layout_torch(
             out, new_tokens, new_depths, new_parents, keep_count
         )
+

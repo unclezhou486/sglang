@@ -911,11 +911,6 @@ def _handle_dspark(server_args: ServerArgs) -> None:
                 cuda_graph_bs_decode=None,
                 cuda_graph_bs_prefill=None,
             )
-        raise NotImplementedError(
-            "DSpark tree v1 is staged but not wired to the worker/DSV4 backend "
-            "yet; remove --speculative-dspark-tree-enable. The CPU-verified core "
-            "lives in sglang/srt/speculative/dspark_components/tree."
-        )
     if (
         cfg.speculative_dspark_align_verify_tokens_to_graph_tier
         and ragged_mode is not RaggedVerifyMode.COMPACT

@@ -1,25 +1,25 @@
-"""Pure-Python/torch core for DSpark tree speculative decoding.
+﻿"""Pure-Python/torch core for DSpark tree speculative decoding.
 
 This package intentionally imports only torch/dataclasses so it can be unit
 tested on CPU without torch_npu, ACL, or the sglang runtime.
 """
 
-from tree.shape import TreeShape
-from tree.layout import TreeLayout, build_chain_layout, finalize_tree_layout_torch
-from tree.scoring import CandidateLayer, DSparkMarkovScorer, IndependentScorer
-from tree.builder import TreeBuilder
-from tree.acceptance import TreeAcceptance, greedy_tree_accept
-from tree.output import TreeAcceptOuts, build_tree_accept_outs
-from tree.metadata import TreeMetadata, build_chain_metadata, build_tree_metadata
-from tree.sparse import build_tree_ori_sparse_indices
-from tree.attention import (
+from .shape import TreeShape
+from .layout import TreeLayout, build_chain_layout, finalize_tree_layout_torch
+from .scoring import CandidateLayer, DSparkMarkovScorer, IndependentScorer
+from .builder import TreeBuilder
+from .acceptance import TreeAcceptance, greedy_tree_accept
+from .output import TreeAcceptOuts, build_tree_accept_outs
+from .metadata import TreeMetadata, build_chain_metadata, build_tree_metadata
+from .sparse import build_tree_ori_sparse_indices
+from .attention import (
     tree_attention,
     tree_attention_reference,
     tree_attn_op_available,
 )
-from tree.commit import TreeCommitPlan, apply_tree_commit, plan_tree_commit
-from tree.config import TreeConfig, resolve_tree_config
-from tree.round import (
+from .commit import TreeCommitPlan, apply_tree_commit, plan_tree_commit
+from .config import TreeConfig, resolve_tree_config
+from .round import (
     TreePostPlan,
     TreePrePlan,
     TreeRoundPlan,
@@ -27,7 +27,7 @@ from tree.round import (
     plan_tree_pre,
     plan_tree_round,
 )
-from tree.node_pool import (
+from .node_pool import (
     NodePlan,
     attend_nodes,
     build_node_plan,
@@ -70,3 +70,4 @@ __all__ = [
     "compress_nodes",
     "attend_nodes",
 ]
+

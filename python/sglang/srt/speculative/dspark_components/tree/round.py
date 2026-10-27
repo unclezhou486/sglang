@@ -1,4 +1,4 @@
-"""Tree round orchestration split into pre-verify and post-verify plans.
+﻿"""Tree round orchestration split into pre-verify and post-verify plans.
 
 The worker builds the pre-plan before the target forward (topology, verify
 geometry, sparse slots) and the post-plan after it (acceptance, output,
@@ -9,15 +9,15 @@ from dataclasses import dataclass
 
 import torch
 
-from tree.acceptance import TreeAcceptance, greedy_tree_accept
-from tree.builder import TreeBuilder
-from tree.commit import TreeCommitPlan, plan_tree_commit
-from tree.config import TreeConfig
-from tree.layout import TreeLayout
-from tree.metadata import TreeMetadata, build_tree_metadata
-from tree.output import TreeAcceptOuts, build_tree_accept_outs
-from tree.scoring import IndependentScorer
-from tree.sparse import build_tree_ori_sparse_indices
+from .acceptance import TreeAcceptance, greedy_tree_accept
+from .builder import TreeBuilder
+from .commit import TreeCommitPlan, plan_tree_commit
+from .config import TreeConfig
+from .layout import TreeLayout
+from .metadata import TreeMetadata, build_tree_metadata
+from .output import TreeAcceptOuts, build_tree_accept_outs
+from .scoring import IndependentScorer
+from .sparse import build_tree_ori_sparse_indices
 
 
 @dataclass
@@ -161,3 +161,4 @@ def plan_tree_round(
         outputs=post.outputs,
         commit=post.commit,
     )
+

@@ -470,6 +470,24 @@ class CompressorAscendBackendMixin:
             allow_build=False,
         )
 
+        tree_plan = getattr(
+            getattr(forward_batch, "spec_info", None), "tree_plan", None
+        )
+        if tree_plan is not None:
+            from sglang.srt.speculative.dspark_components.tree.node_pool import (
+                build_node_plan,
+                compress_nodes,
+            )
+
+            plan = build_node_plan(tree_plan)
+            node_kv, _ = compress_nodes(
+                compressor, x, state_cache, state_block_table, cos, sin, plan
+            )
+            if not hasattr(forward_batch, "tree_node_kv"):
+                forward_batch.tree_node_kv = {}
+            forward_batch.tree_node_kv[compressor.layer_id] = node_kv
+            return
+
         # TODO: torch.ops.npu.compressor does not support Atlas A5 yet.
         compressor_op = (
             torch.ops.custom.compressor if is_npu_arch35() else torch.ops.npu.compressor
@@ -1854,6 +1872,12 @@ class DeepseekV4AscendAttnBackend(
     def init_forward_metadata(self, forward_batch: ForwardBatch) -> None:
         super().init_forward_metadata(forward_batch)
         fm = self.forward_metadata
+        tree_plan = getattr(
+            getattr(forward_batch, "spec_info", None), "tree_plan", None
+        )
+        fm.tree_plan = tree_plan
+        if tree_plan is not None:
+            forward_batch.tree_node_kv = {}
 
         # Idle DP-attention ranks have zero seq_lens, which the metadata kernel
         # cannot handle; skip it and leave the fields cleared but well-typed.
@@ -2099,6 +2123,17 @@ class DeepseekV4AscendAttnBackend(
         attn_sink: Optional[torch.Tensor],
     ) -> torch.Tensor:
         fm = self.forward_metadata
+        if getattr(fm, "tree_plan", None) is not None:
+            return self._forward_tree_attention(
+                q=q,
+                layer=layer,
+                forward_batch=forward_batch,
+                attn_sink=attn_sink,
+                compress_ratio=1,
+                cmp_kv=None,
+                cmp_sparse_indices=None,
+                cmp_block_table=None,
+            )
         pool = self.token_to_kv_pool
         ori_kv = pool.get_swa_buffer(layer.layer_id)
 
@@ -2197,13 +2232,67 @@ class DeepseekV4AscendAttnBackend(
         # c4 attends via indexer topk; c128 reads the full compressed history
         if compress_ratio == 4:
             topk = fm.c4_topk_indices
-            attn_kwargs["cmp_sparse_indices"] = topk.view(-1, 1, topk.shape[-1])
+            cmp_sparse_indices = topk.view(-1, 1, topk.shape[-1])
         else:
-            attn_kwargs["cmp_sparse_indices"] = None
+            cmp_sparse_indices = None
+        if getattr(fm, "tree_plan", None) is not None:
+            return self._forward_tree_attention(
+                q=q,
+                layer=layer,
+                forward_batch=forward_batch,
+                attn_sink=attn_sink,
+                compress_ratio=compress_ratio,
+                cmp_kv=cmp_kv,
+                cmp_sparse_indices=cmp_sparse_indices,
+                cmp_block_table=cmp_block_table,
+            )
+        attn_kwargs["cmp_sparse_indices"] = cmp_sparse_indices
         q_arg = attn_kwargs.pop("q")
         _, attn_op = _sparse_attn_ops()
         out, _ = attn_op(q_arg, **attn_kwargs)
         return out
+
+    def _forward_tree_attention(
+        self,
+        *,
+        q: torch.Tensor,
+        layer: RadixAttention,
+        forward_batch: ForwardBatch,
+        attn_sink: Optional[torch.Tensor],
+        compress_ratio: int,
+        cmp_kv: Optional[torch.Tensor],
+        cmp_sparse_indices: Optional[torch.Tensor],
+        cmp_block_table: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        from sglang.srt.speculative.dspark_components.tree.node_pool import (
+            attend_nodes,
+            build_node_plan,
+        )
+
+        fm = self.forward_metadata
+        tree_plan = fm.tree_plan
+        node_kv = getattr(forward_batch, "tree_node_kv", {}).get(layer.layer_id)
+        if compress_ratio > 1 and node_kv is None:
+            raise RuntimeError(
+                f"tree compressed layer {layer.layer_id} has no node KV; "
+                "the compressor must run before attention."
+            )
+        return attend_nodes(
+            query=q,
+            original=self.token_to_kv_pool.get_swa_buffer(layer.layer_id),
+            compressed=cmp_kv,
+            node_kv=node_kv,
+            metadata=tree_plan.metadata,
+            plan=build_node_plan(tree_plan),
+            ori_sparse_indices=tree_plan.ori_sparse_indices,
+            cmp_sparse_indices=cmp_sparse_indices,
+            ori_block_table=fm.swa_page_table,
+            cmp_block_table=cmp_block_table,
+            sinks=attn_sink,
+            ratio=compress_ratio,
+            window=self._dsv4_sliding_window_size,
+            scale=layer.scaling,
+        )
 
     def get_swa_out_cache_loc(self, forward_batch: ForwardBatch) -> torch.Tensor:
         """Return the SWA KV write locations used by DeepSeek-V4 draft layers.
