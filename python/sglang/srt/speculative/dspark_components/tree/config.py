@@ -12,6 +12,89 @@ class TreeConfig:
     verify_width: int
 
 
+@dataclass(frozen=True)
+class DSparkWidths:
+    """Draft depth and target-verify width are two different quantities.
+
+    ``gamma`` is the draft horizon (``--speculative-dspark-block-size``).
+    ``verify_width`` is the number of target-verify rows per request; it is
+    ``1 + budget`` for a tree and ``gamma + 1`` for a chain.
+    """
+
+    gamma: int
+    verify_width: int
+    tree: TreeConfig | None
+
+
+def resolve_dspark_widths(
+    *,
+    explicit_block_size: int | None,
+    checkpoint_gamma: int | None,
+    num_draft_tokens: int | None,
+    tree_enable: bool,
+    tree_topk: int | None,
+    tree_budget: int | None,
+    ragged_mode: str = "static",
+    default_gamma: int = 7,
+) -> DSparkWidths:
+    """Resolve gamma and the target-verify width together.
+
+    A tree with ``topk > 1`` may have ``budget > gamma``; its verify width is
+    then ``1 + budget`` while the draft model still proposes ``gamma`` tokens.
+    A chain (``topk == 1``) keeps ``budget == gamma`` and ``gamma + 1`` rows.
+    Non-tree DSpark keeps ``gamma + 1`` rows.
+    """
+    gamma = explicit_block_size if explicit_block_size is not None else checkpoint_gamma
+    if tree_enable:
+        if gamma is None:
+            raise ValueError(
+                "DSpark tree mode requires a known draft depth (gamma): set "
+                "--speculative-dspark-block-size or use a draft checkpoint with "
+                "a block_size."
+            )
+        tree = resolve_tree_config(
+            enable=True,
+            topk=tree_topk,
+            budget=tree_budget,
+            depth=int(gamma),
+            ragged_mode=ragged_mode,
+        )
+        assert tree is not None
+        verify_width = tree.verify_width
+    else:
+        if gamma is None:
+            if num_draft_tokens is not None:
+                gamma = int(num_draft_tokens) - 1
+            else:
+                gamma = int(default_gamma)
+        gamma = int(gamma)
+        if gamma < 1:
+            raise ValueError(
+                "DSpark gamma must be >= 1, got "
+                f"{gamma} (num_draft_tokens={num_draft_tokens})."
+            )
+        tree = None
+        verify_width = gamma + 1
+
+    if num_draft_tokens is not None and int(num_draft_tokens) != verify_width:
+        width_src = (
+            f"1 + tree budget (={verify_width})"
+            if tree is not None and tree.topk > 1
+            else f"gamma + 1 (={verify_width})"
+        )
+        raise ValueError(
+            "DSpark speculative_num_draft_tokens must equal "
+            f"{width_src}, but got {num_draft_tokens}."
+        )
+
+    return DSparkWidths(gamma=int(gamma), verify_width=int(verify_width), tree=tree)
+
+
+def resolve_draft_query_width(*, gamma: int, sample_from_anchor: bool) -> int:
+    """Draft-block query rows: anchor sampling uses gamma; otherwise gamma + 1."""
+    return int(gamma) if sample_from_anchor else int(gamma) + 1
+
+
 def resolve_tree_config(
     *,
     enable: bool,
@@ -24,7 +107,8 @@ def resolve_tree_config(
 
     ``topk`` is the per-level branching factor; ``budget`` counts non-root
     nodes. topk=1 is the chain: it requires budget == depth and does not use
-    the tree attention path.
+    the tree attention path. For topk>1, budget may exceed depth, up to the
+    builder capacity ``topk * depth``; the target-verify width is ``1 + budget``.
     """
     if not enable:
         return None
@@ -45,9 +129,14 @@ def resolve_tree_config(
         raise ValueError(
             f"topk=1 is the chain and requires budget == depth ({depth}), got {budget}"
         )
+    if topk > 1 and budget > topk * depth:
+        raise ValueError(
+            f"tree budget {budget} exceeds builder capacity topk * depth = "
+            f"{topk * depth}; increase --speculative-eagle-topk or lower the budget"
+        )
     if ragged_mode != "static":
         raise ValueError(
-            f"DSpark tree v1 requires SGLANG_RAGGED_VERIFY_MODE=static, got {ragged_mode!r}"
+            f"DSpark tree requires SGLANG_RAGGED_VERIFY_MODE=static, got {ragged_mode!r}"
         )
     verify_width = 1 + (depth if topk == 1 else budget)
     return TreeConfig(

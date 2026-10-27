@@ -277,6 +277,8 @@ class DSparkWorkerV2(BaseSpecWorker):
             draft_hf_config=self.draft_model_runner.model_config.hf_config,
             speculative_num_draft_tokens=get_spec().speculative_num_draft_tokens,
             target_vocab_size=int(target_embed_rows),
+            gamma=get_spec().speculative_dspark_block_size,
+            verify_num_draft_tokens=get_spec().speculative_num_draft_tokens,
         )
         self.gamma = runtime_config.gamma
         self.verify_num_draft_tokens = runtime_config.verify_num_draft_tokens
@@ -291,6 +293,15 @@ class DSparkWorkerV2(BaseSpecWorker):
             gamma=self.gamma,
             ragged_mode=read_ragged_verify_mode().value,
         )
+        if (
+            self._tree_config is not None
+            and self.verify_num_draft_tokens != self._tree_config.verify_width
+        ):
+            raise RuntimeError(
+                "DSpark tree verify width mismatch: runtime "
+                f"verify_num_draft_tokens={self.verify_num_draft_tokens}, tree "
+                f"verify_width={self._tree_config.verify_width}."
+            )
         self._tree_sliding_window = int(
             getattr(self.model_runner.model_config.hf_config, "sliding_window", 0)
         )
@@ -1392,6 +1403,9 @@ class DSparkWorkerV2(BaseSpecWorker):
                 run_compact=run_compact,
                 accept_index=(
                     tree_post.outputs.accept_index if tree_post is not None else None
+                ),
+                tree_positions=(
+                    tree_pre.metadata.positions if tree_pre is not None else None
                 ),
             )
         logits_output.hidden_states = None

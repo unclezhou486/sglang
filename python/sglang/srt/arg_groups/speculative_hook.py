@@ -811,51 +811,10 @@ def _handle_dspark(server_args: ServerArgs) -> None:
             e,
         )
 
-    gamma: Optional[int] = None
-    if cfg.speculative_dspark_block_size is not None:
-        if int(cfg.speculative_dspark_block_size) <= 0:
-            raise ValueError(
-                "DSpark requires --speculative-dspark-block-size to be positive, "
-                f"got {cfg.speculative_dspark_block_size}."
-            )
-        gamma = int(cfg.speculative_dspark_block_size)
-    else:
-        if draft_config is not None:
-            gamma = draft_config.resolve_gamma(default=None)
-        if gamma is None and cfg.speculative_num_draft_tokens is None:
-            gamma = DEFAULT_DSPARK_GAMMA
-            logger.warning(
-                "DSpark gamma is not set; defaulting to %d.",
-                gamma,
-            )
-
-    if gamma is not None:
-        verify_window = int(gamma) + 1
-        if (
-            cfg.speculative_num_draft_tokens is not None
-            and int(cfg.speculative_num_draft_tokens) != verify_window
-        ):
-            raise ValueError(
-                "DSpark speculative_num_draft_tokens must equal gamma + 1 "
-                f"(= {verify_window} for gamma={gamma}), but got "
-                f"speculative_num_draft_tokens={cfg.speculative_num_draft_tokens}."
-            )
-        declare_resolution(
-            server_args,
-            "_handle_dspark",
-            speculative_num_draft_tokens=verify_window,
-        )
-
-    if cfg.speculative_num_draft_tokens is None:
-        raise ValueError(
-            "DSpark could not resolve speculative_num_draft_tokens; set "
-            "--speculative-dspark-block-size (= gamma)."
-        )
-    if int(cfg.speculative_num_draft_tokens) < 2:
-        raise ValueError(
-            "DSpark speculative_num_draft_tokens must be >= 2 (= gamma + 1), "
-            f"got {cfg.speculative_num_draft_tokens}."
-        )
+    # gamma (draft horizon) and the target-verify width are resolved together
+    # below, after the ragged mode is known. gamma is the checkpoint block size
+    # or --speculative-dspark-block-size; the verify width is gamma + 1 for
+    # non-tree/chain and 1 + budget for a tree.
 
     if cfg.max_running_requests is None:
         declare_resolution(
@@ -873,38 +832,51 @@ def _handle_dspark(server_args: ServerArgs) -> None:
     )
 
     ragged_mode = read_ragged_verify_mode()
-    if tree_enable:
-        from sglang.srt.speculative.dspark_components.tree.config import (
-            resolve_tree_config,
-        )
+    from sglang.srt.speculative.dspark_components.tree.config import (
+        resolve_dspark_widths,
+    )
 
-        tree_depth = (
-            int(gamma)
-            if gamma is not None
-            else int(cfg.speculative_num_draft_tokens) - 1
+    widths = resolve_dspark_widths(
+        explicit_block_size=cfg.speculative_dspark_block_size,
+        checkpoint_gamma=(
+            draft_config.resolve_gamma(default=None) if draft_config is not None else None
+        ),
+        num_draft_tokens=cfg.speculative_num_draft_tokens,
+        tree_enable=tree_enable,
+        tree_topk=cfg.speculative_eagle_topk,
+        tree_budget=getattr(cfg, "speculative_dspark_tree_budget", None),
+        ragged_mode=ragged_mode.value,
+        default_gamma=DEFAULT_DSPARK_GAMMA,
+    )
+    declare_resolution(
+        server_args,
+        "_handle_dspark",
+        speculative_num_draft_tokens=widths.verify_width,
+    )
+    if cfg.speculative_dspark_block_size is None:
+        # Publish the checkpoint/default gamma so the worker can keep the draft
+        # horizon separate from the target verify width.
+        declare_resolution(
+            server_args,
+            "_handle_dspark",
+            speculative_dspark_block_size=widths.gamma,
         )
-        tree_topk = (
-            2 if cfg.speculative_eagle_topk is None else int(cfg.speculative_eagle_topk)
+    if widths.verify_width < 2:
+        raise ValueError(
+            "DSpark speculative_num_draft_tokens must be >= 2, got "
+            f"{widths.verify_width}."
         )
-        tree_cfg = resolve_tree_config(
-            enable=True,
-            topk=tree_topk,
-            budget=getattr(cfg, "speculative_dspark_tree_budget", None),
-            depth=tree_depth,
-            ragged_mode=ragged_mode.value,
+    if widths.tree is not None and widths.tree.topk > 1:
+        logger.warning("DSpark tree runs eager; disabling decode CUDA graphs.")
+        declare_resolution(
+            server_args,
+            "_handle_dspark",
+            disable_decode_cuda_graph=True,
         )
-        if tree_cfg.verify_width != int(cfg.speculative_num_draft_tokens):
-            raise ValueError(
-                "DSpark tree v1 requires --speculative-dspark-tree-budget == gamma "
-                f"({tree_depth}) so the verify width stays gamma + 1; got budget="
-                f"{getattr(cfg, 'speculative_dspark_tree_budget', None)} and "
-                f"width={cfg.speculative_num_draft_tokens}."
-            )
         if (
             getattr(cfg, "cuda_graph_bs_decode", None) is not None
             or getattr(cfg, "cuda_graph_bs_prefill", None) is not None
         ):
-            logger.warning("DSpark tree v1 runs eager; disabling CUDA graphs.")
             declare_resolution(
                 server_args,
                 "_handle_dspark",

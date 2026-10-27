@@ -124,6 +124,43 @@ class TestDsparkDraftPathDefaulting(CustomTestCase):
         )
 
 
+class TestDsparkTreeBudgetWidth(CustomTestCase):
+    def _make_tree_args(self, *, budget=8, topk=2, block=5, num=None):
+        args = _make_dspark_server_args(
+            model_path=_BUNDLED_MODEL_PATH, hf_config=_bundled_hf_config()
+        )
+        args.speculative_dspark_tree_enable = True
+        args.speculative_dspark_tree_budget = budget
+        args.speculative_eagle_topk = topk
+        args.speculative_dspark_block_size = block
+        args.speculative_num_draft_tokens = num
+        return args
+
+    def test_budget_above_gamma_sets_verify_width(self):
+        args = self._make_tree_args(budget=8, block=5)
+        _handle_dspark(args)
+        self.assertEqual(
+            resolution_result(args, "speculative_num_draft_tokens"), 9
+        )
+        self.assertEqual(resolution_result(args, "speculative_dspark_block_size"), 5)
+        self.assertTrue(resolution_result(args, "disable_decode_cuda_graph"))
+
+    def test_explicit_width_must_be_one_plus_budget(self):
+        args = self._make_tree_args(budget=8, block=5, num=6)
+        with self.assertRaisesRegex(ValueError, r"1 \+ tree budget"):
+            _handle_dspark(args)
+
+    def test_budget_above_builder_capacity_raises(self):
+        args = self._make_tree_args(budget=11, block=5)
+        with self.assertRaisesRegex(ValueError, "builder capacity"):
+            _handle_dspark(args)
+
+    def test_chain_still_requires_budget_equal_depth(self):
+        args = self._make_tree_args(budget=6, topk=1, block=5)
+        with self.assertRaisesRegex(ValueError, "budget == depth"):
+            _handle_dspark(args)
+
+
 class TestTargetCheckpointDsparkSubfolderOnHub(CustomTestCase):
     """A Hub repo id resolves to the snapshot's dspark/ folder, fetching only it."""
 

@@ -76,6 +76,12 @@ class TreeBuilder:
             raise ValueError("root_token_ids batch mismatch")
         width = min(self.topk, vocab, self.budget)
         capacity = width * depth
+        if self.budget > capacity:
+            raise ValueError(
+                f"tree budget {self.budget} exceeds builder capacity "
+                f"topk * depth = {capacity} for topk={self.topk}, "
+                f"depth={depth}, vocab={vocab}; increase topk/vocab or lower budget"
+            )
         device = base_logits.device
 
         state = TreeBuildState(

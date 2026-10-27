@@ -153,6 +153,24 @@ class TestTreeBuilder:
             # parent id is either root (0) or an earlier node id
             assert parent == 0 or 1 <= parent <= slot
 
+    def test_budget_above_depth_builds_a_full_budget_tree(self):
+        builder = TreeBuilder(budget=8, topk=2, depth=5)
+        logits = torch.zeros(1, 5, 8)
+        out = builder.build(logits, root_token_ids=torch.tensor([1]))
+        n = int(out.num_nodes[0])
+        assert n == 8
+        assert out.tokens.shape[1] == 8
+        depths = out.depths[0, :n].tolist()
+        assert all(1 <= d <= 5 for d in depths)
+        parents = out.parents[0, :n].tolist()
+        for slot, parent in enumerate(parents):
+            assert parent == 0 or 1 <= parent <= slot
+
+    def test_budget_above_capacity_is_rejected(self):
+        builder = TreeBuilder(budget=8, topk=2, depth=2)
+        with pytest.raises(ValueError, match="builder capacity"):
+            builder.build(torch.zeros(1, 2, 8), root_token_ids=torch.tensor([1]))
+
     def test_deterministic_on_ties(self):
         builder = TreeBuilder(budget=4, topk=2, depth=3)
         logits = torch.zeros(2, 3, 8)

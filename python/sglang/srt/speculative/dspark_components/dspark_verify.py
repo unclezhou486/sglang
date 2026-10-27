@@ -388,6 +388,7 @@ class TargetVerifyExecutor:
         bs: int,
         run_compact: bool,
         accept_index: Optional[torch.Tensor] = None,
+        tree_positions: Optional[torch.Tensor] = None,
     ) -> None:
         if run_compact:
             self.kv_injector.inject_ragged(
@@ -403,7 +404,11 @@ class TargetVerifyExecutor:
         if hidden is None:
             raise RuntimeError("DSpark verify requires target hidden states, got None.")
         hidden = hidden.view(bs, self.verify_num_draft_tokens, -1)
-        positions = verify_window.positions_2d
+        positions = (
+            tree_positions.reshape(bs, -1)
+            if tree_positions is not None
+            else verify_window.positions_2d
+        )
         cache_loc_2d = verify_window.verify_cache_loc_2d
         if accept_index is not None:
             from sglang.srt.speculative.dspark_components.tree.output import (

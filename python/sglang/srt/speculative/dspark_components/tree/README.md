@@ -28,8 +28,11 @@ blocks. This package imports only `torch` and `dataclasses`; it never imports
 ## Contracts
 
 - Node 0 is the accepted root. Non-root nodes are 1..N; `budget` counts them.
+  `budget` may exceed `depth` (draft gamma) up to the builder capacity
+  `topk * depth`; the target-verify width is `1 + budget`.
 - `topk=1` is the chain: `budget == depth`, verify width `1 + depth`.
-- `topk>1`: verify width `1 + budget`.
+- `topk>1`: verify width `1 + budget`, while the draft horizon remains
+  `gamma = depth`.
 - `tree_ancestors` is root-first, includes self, `-1` padded.
 - `positions`: root at `prefix`, node depth `d` at `prefix + d`.
 - `node_seqused_kv = prefix + depth + 1`.

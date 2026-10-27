@@ -346,7 +346,10 @@ def prepare_nodes(plan: NodePlan, records: list[NodeRecord], winners, active, de
         staging,
         enabled,
         plan.n,
-        plan.max_q,
+        # MAX_Q is the Ancestors row stride and the depth-priority base. It is
+        # max_depth + 1, not the target query width (which is budget + 1 and
+        # can be larger when budget > depth).
+        int(plan.ancestors.shape[1]),
         bn,
         256,
     )
