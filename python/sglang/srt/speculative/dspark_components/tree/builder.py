@@ -146,4 +146,3 @@ class TreeBuilder:
         return finalize_tree_layout_torch(
             out, new_tokens, new_depths, new_parents, keep_count
         )
-

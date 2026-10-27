@@ -365,4 +365,3 @@ def commit_nodes(prepared) -> None:
     desc, staging, enabled, max_rows = prepared
     if desc.shape[0]:
         commit_node_pages[(len(desc), max_rows)](desc, staging, enabled, 256)
-
