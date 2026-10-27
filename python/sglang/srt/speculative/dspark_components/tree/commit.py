@@ -74,6 +74,26 @@ def plan_tree_commit(
     )
 
 
+def move_swa_kv(pool, plan: TreeCommitPlan) -> None:
+    """Move accepted full/SWA KV rows to contiguous history slots.
+
+    This covers the SWA/ori half for every layer (including compressed layers,
+    whose recent window lives in the same SWA buffer). Compressed KV is
+    committed separately by the node page kernels.
+    """
+    mask = plan.source_rows >= 0
+    if not bool(mask.any()):
+        return
+    source = plan.source_rows[mask].to(torch.int64)
+    dest = plan.dest_slots[mask].to(torch.int64)
+    src_swa = pool.translate_loc_from_full_to_swa(source)
+    dst_swa = pool.translate_loc_from_full_to_swa(dest)
+    for layer_id in range(int(pool.layer_num)):
+        buffer = pool.get_swa_buffer(layer_id)
+        flat = buffer.flatten(0, 1)
+        flat[dst_swa] = flat[src_swa]
+
+
 def apply_tree_commit(plan: TreeCommitPlan, *, pool=None, device_hook=None) -> None:
     """Apply the plan through an explicit device hook or a pool move method."""
     if device_hook is not None:

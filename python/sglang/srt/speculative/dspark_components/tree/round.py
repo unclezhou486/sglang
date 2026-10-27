@@ -5,7 +5,7 @@ geometry, sparse slots) and the post-plan after it (acceptance, output,
 commit). No device op is called here.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -25,6 +25,7 @@ class TreePrePlan:
     layout: TreeLayout
     metadata: TreeMetadata
     ori_sparse_indices: torch.Tensor
+    node_records: list = field(default_factory=list)
 
 
 @dataclass

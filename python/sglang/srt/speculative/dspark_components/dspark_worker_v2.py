@@ -87,9 +87,14 @@ from sglang.srt.speculative.dspark_components.dspark_verify import (
     target_uses_fused_argmax,
     verify_logits_adjustments_are_noop,
 )
-from sglang.srt.speculative.dspark_components.tree.commit import apply_tree_commit
+from sglang.srt.speculative.dspark_components.tree.commit import move_swa_kv
 from sglang.srt.speculative.dspark_components.tree.config import (
     resolve_tree_for_server,
+)
+from sglang.srt.speculative.dspark_components.tree.node_pool import (
+    build_node_plan,
+    commit_nodes,
+    prepare_nodes,
 )
 from sglang.srt.speculative.dspark_components.tree.round import (
     plan_tree_post,
@@ -1289,7 +1294,19 @@ class DSparkWorkerV2(BaseSpecWorker):
                 new_seq_lens=tree_post.commit.new_seq_lens,
                 out_tokens=tree_post.outputs.out_tokens,
             )
-            apply_tree_commit(tree_post.commit)
+            pool = self.model_runner.token_to_kv_pool
+            move_swa_kv(pool, tree_post.commit)
+            records = getattr(tree_pre, "node_records", [])
+            if records:
+                plan = build_node_plan(tree_pre)
+                prepared = prepare_nodes(
+                    plan,
+                    records,
+                    tree_post.acceptance.endpoint_node,
+                    tree_post.acceptance.active,
+                    self.device,
+                )
+                commit_nodes(prepared)
         elif region_accept is not None:
             epilogue.note_static_verify(bs)
             accept = region_accept

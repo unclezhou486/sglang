@@ -74,6 +74,10 @@ def compress_nodes(
     cos: torch.Tensor,
     sin: torch.Tensor,
     plan: NodePlan,
+    *,
+    record_sink: list | None = None,
+    kv_buffer: torch.Tensor | None = None,
+    kv_table: torch.Tensor | None = None,
 ):
     """Project and aggregate per-node compressed KV.
 
@@ -131,6 +135,18 @@ def compress_nodes(
         int(module.rope_head_dim),
         float(module.norm.variance_epsilon),
     )
+    if record_sink is not None:
+        if kv_buffer is None or kv_table is None:
+            raise ValueError("record_sink requires kv_buffer and kv_table")
+        record_sink.append(
+            record_compressed_nodes(
+                plan,
+                original=kv_buffer,
+                node_data=node_kv,
+                table=kv_table,
+                ratio=int(module.ratio),
+            )
+        )
     return node_kv, nodes
 
 

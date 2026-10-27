@@ -481,7 +481,18 @@ class CompressorAscendBackendMixin:
 
             plan = build_node_plan(tree_plan)
             node_kv, _ = compress_nodes(
-                compressor, x, state_cache, state_block_table, cos, sin, plan
+                compressor,
+                x,
+                state_cache,
+                state_block_table,
+                cos,
+                sin,
+                plan,
+                record_sink=getattr(tree_plan, "node_records", None),
+                kv_buffer=self.token_to_kv_pool.get_compress_buffer(
+                    compressor.layer_id, False
+                ),
+                kv_table=getattr(fm, f"c{ratio}_page_table"),
             )
             if not hasattr(forward_batch, "tree_node_kv"):
                 forward_batch.tree_node_kv = {}

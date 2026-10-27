@@ -14,7 +14,7 @@ from tree.attention import (
     tree_attention_reference,
     tree_attn_op_available,
 )
-from tree.commit import TreeCommitPlan, apply_tree_commit, plan_tree_commit
+from tree.commit import TreeCommitPlan, apply_tree_commit, move_swa_kv, plan_tree_commit
 from tree.config import TreeConfig, resolve_tree_config, resolve_tree_for_server
 
 
@@ -276,6 +276,36 @@ class TestCommitPlan:
         calls = []
         apply_tree_commit(plan, device_hook=lambda p: calls.append(p))
         assert len(calls) == 1 and calls[0] is plan
+
+    def test_move_swa_kv_moves_accepted_rows(self):
+        class FakePool:
+            layer_num = 1
+
+            def __init__(self):
+                self.buf = torch.arange(8 * 1 * 4, dtype=torch.float32).reshape(
+                    8, 1, 4
+                )
+                self.map = torch.arange(8, dtype=torch.long)
+
+            def get_swa_buffer(self, layer_id):
+                return self.buf
+
+            def translate_loc_from_full_to_swa(self, loc):
+                return self.map[loc]
+
+        pool = FakePool()
+        src1 = pool.buf[1].clone()
+        src3 = pool.buf[3].clone()
+        plan = TreeCommitPlan(
+            source_rows=torch.tensor([[1, 3]]),
+            dest_positions=torch.tensor([[5, 6]]),
+            dest_slots=torch.tensor([[5, 6]]),
+            commit_lens=torch.tensor([3]),
+            new_seq_lens=torch.tensor([8]),
+        )
+        move_swa_kv(pool, plan)
+        assert torch.equal(pool.buf[5], src1)
+        assert torch.equal(pool.buf[6], src3)
 
 
 class TestTreeConfig:
