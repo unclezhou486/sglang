@@ -24,6 +24,7 @@ from .attention import tree_attention, tree_attn_op_available
 @dataclass
 class NodePlan:
     n: int
+    max_q: int
     start: torch.Tensor  # [n] int32 prefix base per node
     depths: torch.Tensor  # [n] int64 depth per node (root = 0)
     ancestors: torch.Tensor  # [n, A] int64 root-first node ids
@@ -40,6 +41,7 @@ def build_node_plan(pre) -> NodePlan:
     device = meta.verify_ids.device
     return NodePlan(
         n=n,
+        max_q=meta.query_width,
         start=meta.tree_prefix.to(torch.int32),
         depths=(meta.positions - meta.tree_prefix.to(meta.positions.dtype)).to(
             torch.int64
@@ -53,6 +55,10 @@ def build_node_plan(pre) -> NodePlan:
 
 
 def tree_compressor_ops_available() -> bool:
+    from .torch_ops import ensure_tree_ops
+
+    if not ensure_tree_ops():
+        return False
     try:
         namespace = getattr(torch.ops, "_C_ascend", None)
         return namespace is not None and hasattr(namespace, "compressor_tree")
@@ -171,4 +177,166 @@ def attend_nodes(
         ori_win_left=window - 1,
         ori_win_right=0,
     )
+
+
+@dataclass
+class NodeRecord:
+    """One layer's compressed KV buffer plus its per-node rows."""
+
+    original: torch.Tensor  # [pages, rows, ..., dim]
+    node_data: torch.Tensor  # [n, ..., dim] contiguous
+    table: torch.Tensor  # [reqs, width] int32 page table
+    pages: tuple[int, ...]
+    ratio: int
+
+
+def _window_pages(plan: NodePlan, table: torch.Tensor, ratio: int, rows: int):
+    req_ids = plan.req_ids.tolist()
+    starts = plan.start.tolist()
+    depth_limit = int(plan.max_q)
+    width = int(table.shape[1])
+    table_host = table.tolist()
+    pages: set[int] = set()
+    n_req = max(req_ids) + 1 if req_ids else 0
+    for req in range(n_req):
+        first = req_ids.index(req)
+        prefix = int(starts[first])
+        for pos in range(prefix, prefix + depth_limit):
+            cpos = pos // ratio
+            col = cpos // rows
+            if col >= width:
+                continue
+            page = int(table_host[req][col])
+            if page > 0:
+                pages.add(page)
+    return tuple(sorted(pages))
+
+
+def record_compressed_nodes(
+    plan: NodePlan,
+    *,
+    original: torch.Tensor,
+    node_data: torch.Tensor,
+    table: torch.Tensor,
+    ratio: int,
+) -> NodeRecord:
+    """Record the pages and node rows for the post-accept commit kernels."""
+    if ratio not in (4, 128):
+        raise ValueError(f"tree node commit ratio must be 4 or 128, got {ratio}")
+    if original.dim() < 3:
+        raise ValueError("original compressed buffer must be [pages, rows, ...]")
+    if node_data.shape[0] != plan.n:
+        raise ValueError(
+            f"node rows {node_data.shape[0]} != plan.n {plan.n}"
+        )
+    if not node_data.is_contiguous():
+        raise ValueError("node_data must be contiguous for the commit kernel")
+    rows = int(original.shape[1])
+    row_bytes = 1
+    for dim in original.shape[2:]:
+        row_bytes *= int(dim)
+    row_bytes *= original.element_size()
+    node_row_bytes = 1
+    for dim in node_data.shape[1:]:
+        node_row_bytes *= int(dim)
+    node_row_bytes *= node_data.element_size()
+    if node_row_bytes != row_bytes:
+        raise ValueError(
+            f"node row bytes {node_row_bytes} != cache row bytes {row_bytes}"
+        )
+    return NodeRecord(
+        original=original,
+        node_data=node_data,
+        table=table,
+        pages=_window_pages(plan, table, ratio, rows),
+        ratio=int(ratio),
+    )
+
+
+def build_node_descriptors(records: list[NodeRecord]):
+    """Pure descriptor list for freeze_node_pages; also returns staging size."""
+    descriptors: list[tuple[int, ...]] = []
+    total = 0
+    max_rows = 1
+    for record in records:
+        original = record.original
+        element = original.element_size()
+        rows = int(original.shape[1])
+        row_bytes = 1
+        for dim in original.shape[2:]:
+            row_bytes *= int(dim)
+        row_bytes *= element
+        page_stride = int(original.stride(0)) * element
+        row_stride = int(original.stride(1)) * element
+        for page in record.pages:
+            descriptors.append(
+                (
+                    original.data_ptr() + page * page_stride,
+                    row_stride,
+                    row_bytes,
+                    rows,
+                    record.node_data.data_ptr(),
+                    record.table.data_ptr(),
+                    int(record.table.shape[1]),
+                    int(page),
+                    total,
+                    int(record.ratio),
+                )
+            )
+            total += rows * row_bytes
+            max_rows = max(max_rows, rows)
+    return descriptors, total, max_rows
+
+
+def prepare_nodes(plan: NodePlan, records: list[NodeRecord], winners, active, device):
+    """Freeze accepted node rows into staging before touching the live cache."""
+    try:
+        from .node_commit import freeze_node_pages
+    except ModuleNotFoundError as exc:
+        raise NotImplementedError(
+            "DSpark tree node commit requires Triton (freeze_node_pages); "
+            "install triton to commit node pages."
+        ) from exc
+    descriptors, total, max_rows = build_node_descriptors(records)
+    if not descriptors:
+        return (
+            torch.empty((0, 10), dtype=torch.int64, device=device),
+            torch.empty((0,), dtype=torch.uint8, device=device),
+            torch.empty((0,), dtype=torch.bool, device=device),
+            1,
+        )
+    desc = torch.tensor(descriptors, dtype=torch.int64, device=device)
+    staging = torch.empty(total, dtype=torch.uint8, device=device)
+    enabled = torch.empty(len(descriptors), dtype=torch.bool, device=device)
+    bn = 1 << max(int(plan.n) - 1, 0).bit_length()
+    freeze_node_pages[(len(descriptors), max_rows)](
+        desc,
+        plan.ancestors,
+        plan.depths,
+        plan.start,
+        plan.req_ids,
+        winners,
+        active,
+        staging,
+        enabled,
+        plan.n,
+        plan.max_q,
+        bn,
+        256,
+    )
+    return desc, staging, enabled, max_rows
+
+
+def commit_nodes(prepared) -> None:
+    """Scatter the frozen staging rows into the live compressed cache pages."""
+    try:
+        from .node_commit import commit_node_pages
+    except ModuleNotFoundError as exc:
+        raise NotImplementedError(
+            "DSpark tree node commit requires Triton (commit_node_pages); "
+            "install triton to commit node pages."
+        ) from exc
+    desc, staging, enabled, max_rows = prepared
+    if desc.shape[0]:
+        commit_node_pages[(len(desc), max_rows)](desc, staging, enabled, 256)
 

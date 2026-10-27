@@ -29,10 +29,16 @@ from .round import (
 )
 from .node_pool import (
     NodePlan,
+    NodeRecord,
     attend_nodes,
+    build_node_descriptors,
     build_node_plan,
+    commit_nodes,
     compress_nodes,
+    prepare_nodes,
+    record_compressed_nodes,
 )
+from .torch_ops import ensure_tree_ops, load_tree_ops, tree_ops_loaded
 
 __all__ = [
     "TreeShape",
@@ -66,8 +72,16 @@ __all__ = [
     "plan_tree_pre",
     "plan_tree_post",
     "NodePlan",
+    "NodeRecord",
     "build_node_plan",
+    "build_node_descriptors",
+    "record_compressed_nodes",
+    "prepare_nodes",
+    "commit_nodes",
     "compress_nodes",
     "attend_nodes",
+    "ensure_tree_ops",
+    "load_tree_ops",
+    "tree_ops_loaded",
 ]
 

@@ -7,6 +7,10 @@ import torch
 
 def tree_attn_op_available() -> bool:
     """True only when the native tree attention op is registered."""
+    from .torch_ops import ensure_tree_ops
+
+    if not ensure_tree_ops():
+        return False
     try:
         namespace = getattr(torch.ops, "_C_ascend", None)
         return namespace is not None and hasattr(

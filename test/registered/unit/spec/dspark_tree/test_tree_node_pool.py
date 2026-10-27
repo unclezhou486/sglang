@@ -4,8 +4,16 @@ import pytest
 import torch
 
 from tree.config import resolve_tree_config
-from tree.node_pool import build_node_plan, compress_nodes, tree_compressor_ops_available
+from tree.node_pool import (
+    build_node_descriptors,
+    build_node_plan,
+    compress_nodes,
+    prepare_nodes,
+    record_compressed_nodes,
+    tree_compressor_ops_available,
+)
 from tree.round import plan_tree_pre
+from tree.torch_ops import ensure_tree_ops, load_tree_ops
 
 
 def _pre():
@@ -51,3 +59,63 @@ def test_device_boundary_is_explicit():
             sin=torch.zeros(8, 64),
             plan=plan,
         )
+
+
+def test_record_and_descriptors():
+    pre = _pre()
+    plan = build_node_plan(pre)
+    assert plan.max_q == pre.metadata.query_width
+    original = torch.zeros(4, 4, 1, 8, dtype=torch.float32)
+    node_data = torch.zeros(plan.n, 1, 8, dtype=torch.float32)
+    table = torch.tensor([[1, 2, 3, 4]], dtype=torch.int32)
+    record = record_compressed_nodes(
+        plan, original=original, node_data=node_data, table=table, ratio=4
+    )
+    assert record.pages == (1,)
+    descriptors, total, max_rows = build_node_descriptors([record])
+    assert len(descriptors) == 1
+    page_ptr, row_stride, row_bytes, rows, node_ptr, table_ptr, width, page, off, ratio = (
+        descriptors[0]
+    )
+    assert row_bytes == 8 * 4
+    assert rows == 4
+    assert width == 4
+    assert page == 1
+    assert ratio == 4
+    assert total == 4 * (8 * 4)
+    assert max_rows == 4
+
+
+def test_prepare_requires_triton_on_cpu():
+    pytest.importorskip("torch")
+    try:
+        import triton  # noqa: F401
+    except ModuleNotFoundError:
+        triton_installed = False
+    else:
+        triton_installed = True
+    if triton_installed:
+        pytest.skip("triton is installed")
+    pre = _pre()
+    plan = build_node_plan(pre)
+    record = record_compressed_nodes(
+        plan,
+        original=torch.zeros(4, 4, 1, 8, dtype=torch.float32),
+        node_data=torch.zeros(plan.n, 1, 8, dtype=torch.float32),
+        table=torch.tensor([[1, 2, 3, 4]], dtype=torch.int32),
+        ratio=4,
+    )
+    with pytest.raises(NotImplementedError, match="Triton"):
+        prepare_nodes(
+            plan,
+            [record],
+            torch.zeros(1, dtype=torch.long),
+            torch.ones(1, dtype=torch.bool),
+            torch.device("cpu"),
+        )
+
+
+def test_torch_ops_no_env(monkeypatch):
+    monkeypatch.delenv("SGLANG_DSPARK_TREE_OPS", raising=False)
+    assert load_tree_ops("") == ()
+    assert ensure_tree_ops() is False
