@@ -916,6 +916,11 @@ class C4IndexerAscendBackendMixin:
     ) -> None:
         if forward_batch.forward_mode.is_idle():
             return
+        if getattr(getattr(forward_batch, "spec_info", None), "tree_plan", None) is not None:
+            raise NotImplementedError(
+                "DSpark tree c4 indexer requires quant_lightning_indexer_tree and "
+                "the per-node K/scale producer; that producer is not wired yet."
+            )
         # skip_compressor=True is the CP full-metadata protocol: the compressor
         # already ran via forward_indexer_compressor.
         self._ensure_npu_c4_indexer(c4_indexer, x.device)

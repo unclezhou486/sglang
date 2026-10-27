@@ -38,6 +38,11 @@ from .node_pool import (
     prepare_nodes,
     record_compressed_nodes,
 )
+from .indexer import (
+    tree_indexer,
+    tree_indexer_ops_available,
+    tree_indexer_select_all,
+)
 from .torch_ops import ensure_tree_ops, load_tree_ops, tree_ops_loaded
 
 __all__ = [
@@ -83,5 +88,8 @@ __all__ = [
     "ensure_tree_ops",
     "load_tree_ops",
     "tree_ops_loaded",
+    "tree_indexer",
+    "tree_indexer_select_all",
+    "tree_indexer_ops_available",
 ]
 
