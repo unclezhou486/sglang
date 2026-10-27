@@ -86,8 +86,25 @@ def test_record_and_descriptors():
     assert max_rows == 4
 
 
+def test_record_state_ratio_one():
+    pre = _pre()
+    plan = build_node_plan(pre)
+    state = torch.zeros(4, 4, 8, dtype=torch.float32)
+    nodes = torch.zeros(plan.n, 1, 1, 8, dtype=torch.float32)
+    table = torch.tensor([[1, 2, 3, 4]], dtype=torch.int32)
+    record = record_compressed_nodes(
+        plan, original=state, node_data=nodes, table=table, ratio=1
+    )
+    assert record.ratio == 1
+    assert record.pages == (1, 2)
+    descriptors, total, max_rows = build_node_descriptors([record])
+    assert descriptors[0][2] == 8 * 4
+    assert descriptors[0][3] == 4
+    assert total == 2 * 4 * (8 * 4)
+    assert max_rows == 4
+
+
 def test_prepare_requires_triton_on_cpu():
-    pytest.importorskip("torch")
     try:
         import triton  # noqa: F401
     except ModuleNotFoundError:

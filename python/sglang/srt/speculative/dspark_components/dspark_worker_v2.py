@@ -1332,7 +1332,9 @@ class DSparkWorkerV2(BaseSpecWorker):
         # The static verify graph committed the engram history when it folded the accept.
         if not engram_in_graph:
             self.model_runner.ngram_embedding_manager.update_after_verify(
-                verify_ids_2d=verify_ids_2d,
+                verify_ids_2d=(
+                    accept.out_tokens if tree_post is not None else verify_ids_2d
+                ),
                 req_pool_indices=batch.req_pool_indices,
                 commit_lens=accept.commit_lens,
             )
@@ -1388,6 +1390,9 @@ class DSparkWorkerV2(BaseSpecWorker):
                 commit_lens=accept.commit_lens,
                 bs=bs,
                 run_compact=run_compact,
+                accept_index=(
+                    tree_post.outputs.accept_index if tree_post is not None else None
+                ),
             )
         logits_output.hidden_states = None
 

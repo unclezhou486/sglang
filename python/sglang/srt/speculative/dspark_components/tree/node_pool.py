@@ -136,17 +136,27 @@ def compress_nodes(
         float(module.norm.variance_epsilon),
     )
     if record_sink is not None:
-        if kv_buffer is None or kv_table is None:
-            raise ValueError("record_sink requires kv_buffer and kv_table")
+        # ratio=1 records the projected state row (one per node); the commit
+        # kernel treats ratio=1 as state and writes it back to the state cache.
         record_sink.append(
             record_compressed_nodes(
                 plan,
-                original=kv_buffer,
-                node_data=node_kv,
-                table=kv_table,
-                ratio=int(module.ratio),
+                original=state,
+                node_data=nodes[1:],
+                table=table,
+                ratio=1,
             )
         )
+        if kv_buffer is not None and kv_table is not None:
+            record_sink.append(
+                record_compressed_nodes(
+                    plan,
+                    original=kv_buffer,
+                    node_data=node_kv,
+                    table=kv_table,
+                    ratio=int(module.ratio),
+                )
+            )
     return node_kv, nodes
 
 
@@ -237,8 +247,8 @@ def record_compressed_nodes(
     ratio: int,
 ) -> NodeRecord:
     """Record the pages and node rows for the post-accept commit kernels."""
-    if ratio not in (4, 128):
-        raise ValueError(f"tree node commit ratio must be 4 or 128, got {ratio}")
+    if ratio not in (1, 4, 128):
+        raise ValueError(f"tree node commit ratio must be 1/4/128, got {ratio}")
     if original.dim() < 3:
         raise ValueError("original compressed buffer must be [pages, rows, ...]")
     if node_data.shape[0] != plan.n:

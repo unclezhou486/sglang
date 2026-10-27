@@ -11,7 +11,7 @@ from tree.layout import TreeLayout, build_chain_layout, finalize_tree_layout_tor
 from tree.scoring import CandidateLayer, DSparkMarkovScorer, IndependentScorer
 from tree.builder import TreeBuilder
 from tree.acceptance import greedy_tree_accept
-from tree.output import build_tree_accept_outs
+from tree.output import build_tree_accept_outs, gather_accepted_rows
 
 
 def _layout_buf(bs: int, budget: int) -> TreeLayout:
@@ -226,3 +226,11 @@ class TestOutput:
         assert out.out_tokens[0, 1:].tolist() == [0, 0]
         assert out.commit_lens[0].item() == 1
         assert out.new_seq_lens[0].item() == 11
+
+    def test_gather_accepted_rows(self):
+        tensor = torch.tensor([[[10.0], [11.0], [12.0]]])
+        accept_index = torch.tensor([[1, 2, -1]])
+        gathered = gather_accepted_rows(tensor, accept_index)
+        assert gathered[0, :2, 0].tolist() == [11.0, 12.0]
+        # padding clamps to column 0; the commit-length gate drops it
+        assert gathered[0, 2, 0].item() == 10.0

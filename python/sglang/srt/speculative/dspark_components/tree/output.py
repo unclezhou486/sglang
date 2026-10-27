@@ -66,3 +66,23 @@ def build_tree_accept_outs(
         new_seq_lens=new_seq_lens,
         num_accepted=num_accepted,
     )
+
+
+def gather_accepted_rows(tensor: torch.Tensor, accept_index: torch.Tensor) -> torch.Tensor:
+    """Gather each row's accepted path into the leading columns.
+
+    ``tensor`` is [bs, query_width, ...]; ``accept_index`` is [bs, query_width]
+    of flat verify-row indices (row * query_width + node) or -1. Padding columns
+    are clamped to column 0 and are dropped by the commit-length gate.
+    """
+    if tensor.dim() < 2 or tensor.shape[:2] != accept_index.shape:
+        raise ValueError(
+            f"tensor leading shape {tuple(tensor.shape[:2])} != "
+            f"accept_index {tuple(accept_index.shape)}"
+        )
+    query_width = accept_index.shape[1]
+    local = torch.where(
+        accept_index >= 0, accept_index % query_width, accept_index.new_zeros(())
+    ).to(torch.long)
+    rows = torch.arange(accept_index.shape[0], device=accept_index.device).unsqueeze(1)
+    return tensor[rows, local]
