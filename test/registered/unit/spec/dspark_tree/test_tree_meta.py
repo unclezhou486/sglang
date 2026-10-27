@@ -15,7 +15,7 @@ from tree.attention import (
     tree_attn_op_available,
 )
 from tree.commit import TreeCommitPlan, apply_tree_commit, plan_tree_commit
-from tree.config import TreeConfig, resolve_tree_config
+from tree.config import TreeConfig, resolve_tree_config, resolve_tree_for_server
 
 
 def _buf(bs, budget):
@@ -298,3 +298,31 @@ class TestTreeConfig:
         cfg = resolve_tree_config(enable=True, topk=2, budget=8, depth=7)
         assert isinstance(cfg, TreeConfig)
         assert cfg.verify_width == 9
+
+    def test_resolve_from_server_args(self):
+        from types import SimpleNamespace
+
+        off = SimpleNamespace(
+            speculative_dspark_tree_enable=False,
+            speculative_eagle_topk=2,
+            speculative_dspark_tree_budget=5,
+        )
+        assert resolve_tree_for_server(off, gamma=5) is None
+
+        on = SimpleNamespace(
+            speculative_dspark_tree_enable=True,
+            speculative_eagle_topk=2,
+            speculative_dspark_tree_budget=5,
+        )
+        cfg = resolve_tree_for_server(on, gamma=5)
+        assert cfg.verify_width == 6
+
+        default_topk = SimpleNamespace(
+            speculative_dspark_tree_enable=True,
+            speculative_eagle_topk=None,
+            speculative_dspark_tree_budget=5,
+        )
+        assert resolve_tree_for_server(default_topk, gamma=5).topk == 2
+
+        with pytest.raises(ValueError, match="static"):
+            resolve_tree_for_server(on, gamma=5, ragged_mode="compact")

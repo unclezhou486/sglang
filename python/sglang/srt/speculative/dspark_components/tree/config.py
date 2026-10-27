@@ -57,3 +57,14 @@ def resolve_tree_config(
         topk=topk,
         verify_width=verify_width,
     )
+
+
+def resolve_tree_for_server(server_args, *, gamma: int, ragged_mode: str = "static"):
+    """Resolve tree knobs from a ServerArgs-like object (getattr-safe)."""
+    return resolve_tree_config(
+        enable=bool(getattr(server_args, "speculative_dspark_tree_enable", False)),
+        topk=getattr(server_args, "speculative_eagle_topk", None),
+        budget=getattr(server_args, "speculative_dspark_tree_budget", None),
+        depth=gamma,
+        ragged_mode=ragged_mode,
+    )

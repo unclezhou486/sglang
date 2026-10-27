@@ -771,7 +771,15 @@ def _handle_dspark(server_args: ServerArgs) -> None:
             speculative_num_steps=1,
         )
 
-    if cfg.speculative_eagle_topk is None:
+    tree_enable = bool(getattr(cfg, "speculative_dspark_tree_enable", False))
+    if tree_enable:
+        if cfg.speculative_eagle_topk is None:
+            declare_resolution(
+                server_args,
+                "_handle_dspark",
+                speculative_eagle_topk=2,
+            )
+    elif cfg.speculative_eagle_topk is None:
         declare_resolution(
             server_args,
             "_handle_dspark",
@@ -865,6 +873,49 @@ def _handle_dspark(server_args: ServerArgs) -> None:
     )
 
     ragged_mode = read_ragged_verify_mode()
+    if tree_enable:
+        from sglang.srt.speculative.dspark_components.tree.config import (
+            resolve_tree_config,
+        )
+
+        tree_depth = (
+            int(gamma)
+            if gamma is not None
+            else int(cfg.speculative_num_draft_tokens) - 1
+        )
+        tree_topk = (
+            2 if cfg.speculative_eagle_topk is None else int(cfg.speculative_eagle_topk)
+        )
+        tree_cfg = resolve_tree_config(
+            enable=True,
+            topk=tree_topk,
+            budget=getattr(cfg, "speculative_dspark_tree_budget", None),
+            depth=tree_depth,
+            ragged_mode=ragged_mode.value,
+        )
+        if tree_cfg.verify_width != int(cfg.speculative_num_draft_tokens):
+            raise ValueError(
+                "DSpark tree v1 requires --speculative-dspark-tree-budget == gamma "
+                f"({tree_depth}) so the verify width stays gamma + 1; got budget="
+                f"{getattr(cfg, 'speculative_dspark_tree_budget', None)} and "
+                f"width={cfg.speculative_num_draft_tokens}."
+            )
+        if (
+            getattr(cfg, "cuda_graph_bs_decode", None) is not None
+            or getattr(cfg, "cuda_graph_bs_prefill", None) is not None
+        ):
+            logger.warning("DSpark tree v1 runs eager; disabling CUDA graphs.")
+            declare_resolution(
+                server_args,
+                "_handle_dspark",
+                cuda_graph_bs_decode=None,
+                cuda_graph_bs_prefill=None,
+            )
+        raise NotImplementedError(
+            "DSpark tree v1 is staged but not wired to the worker/DSV4 backend "
+            "yet; remove --speculative-dspark-tree-enable. The CPU-verified core "
+            "lives in sglang/srt/speculative/dspark_components/tree."
+        )
     if (
         cfg.speculative_dspark_align_verify_tokens_to_graph_tier
         and ragged_mode is not RaggedVerifyMode.COMPACT
