@@ -21,6 +21,9 @@ blocks. This package imports only `torch` and `dataclasses`; it never imports
 | `config.py` | Pure `resolve_tree_config` validation. |
 | `round.py` | One-call `plan_tree_round`: builder → metadata → sparse → accept → output → commit. |
 | `node_pool.py` | DSV4 node KV pipeline: `compress_nodes` (`compressor_tree_project` + `compressor_tree`) and `attend_nodes` (`cmp_tree_kv`). Every node uses its own hidden row. |
+| `node_commit.py` | Triton `freeze_node_pages` / `commit_node_pages` for accepted node rows. |
+| `torch_ops.py` | Loads the three tree binding `.so` files from `SGLANG_DSPARK_TREE_OPS`. |
+| `indexer.py` | Tree c4 indexer adapter (`quant_lightning_indexer_tree`) + select-all shortcut. |
 
 ## Contracts
 
@@ -54,12 +57,20 @@ and `MarkovScorer` model API; sglang's Markov head exposes
   `native_attention._original_slots` and `triton/tree/node_pool.py`).
 - `plan_tree_round` is a host planner; call it per round outside the captured
   region.
+- `node_commit.py` requires Triton on device; on CPU-only hosts the import is
+  lazy and `prepare_nodes` / `commit_nodes` raise a clear
+  `NotImplementedError`.
 
 ## Device-only boundaries (never faked)
 
 - Native tree attention: `torch.ops._C_ascend.npu_sparse_attn_sharedkv_tree`.
-- DSV4 pool relocation: the pools have no `move_kv_cache`; `apply_tree_commit`
-  raises unless a device hook is supplied.
+- Accepted-node commit: `dspark_worker_v2` uses `move_swa_kv` (pool-level SWA
+  move) plus `prepare_nodes` / `commit_nodes` (Triton node-page staging). The
+  legacy `apply_tree_commit` hook only runs when a caller supplies a device
+  hook.
+- c4 tree indexer: the `quant_lightning_indexer_tree` adapter exists, but the
+  per-node K/scale producer is not wired; `forward_c4_indexer` raises until it
+  lands. This is the remaining end-to-end blocker.
 - TP-sharded Markov `w2`: rejected (`SGLANG_DSPARK_OPT_MARKOV_W2_TP_SHARD`).
 - Stateful Markov heads, sampling accept, graph capture: rejected in v1.
 - The CPU attention reference is reachable only when

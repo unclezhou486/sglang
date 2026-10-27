@@ -95,7 +95,12 @@ def move_swa_kv(pool, plan: TreeCommitPlan) -> None:
 
 
 def apply_tree_commit(plan: TreeCommitPlan, *, pool=None, device_hook=None) -> None:
-    """Apply the plan through an explicit device hook or a pool move method."""
+    """Legacy commit path: explicit device hook or pool-level move_kv_cache.
+
+    The DSV4 worker now commits accepted nodes with ``move_swa_kv`` plus
+    ``prepare_nodes`` / ``commit_nodes``; this function remains for pools that
+    expose ``move_kv_cache`` and for explicit test hooks.
+    """
     if device_hook is not None:
         device_hook(plan)
         return
