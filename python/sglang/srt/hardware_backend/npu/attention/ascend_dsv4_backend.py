@@ -473,7 +473,9 @@ class CompressorAscendBackendMixin:
         tree_plan = getattr(
             getattr(forward_batch, "spec_info", None), "tree_plan", None
         )
-        if tree_plan is not None:
+        if tree_plan is not None and not bool(
+            getattr(compressor, "is_in_indexer", False)
+        ):
             from sglang.srt.speculative.dspark_components.tree.node_pool import (
                 build_node_plan,
                 compress_nodes,
