@@ -39,6 +39,7 @@ from .node_pool import (
     record_compressed_nodes,
 )
 from .indexer import (
+    quantize_indexer_nodes,
     tree_indexer,
     tree_indexer_ops_available,
     tree_indexer_select_all,
@@ -91,4 +92,5 @@ __all__ = [
     "tree_indexer",
     "tree_indexer_select_all",
     "tree_indexer_ops_available",
+    "quantize_indexer_nodes",
 ]

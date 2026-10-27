@@ -501,6 +501,64 @@ class CompressorAscendBackendMixin:
             forward_batch.tree_node_kv[compressor.layer_id] = node_kv
             return
 
+        if tree_plan is not None:
+            from sglang.srt.speculative.dspark_components.tree.indexer import (
+                quantize_indexer_nodes,
+            )
+            from sglang.srt.speculative.dspark_components.tree.node_pool import (
+                build_node_plan,
+                compress_nodes,
+                record_compressed_nodes,
+            )
+
+            plan = build_node_plan(tree_plan)
+            records = getattr(tree_plan, "node_records", None)
+            node_kv, _ = compress_nodes(
+                compressor,
+                x,
+                state_cache,
+                state_block_table,
+                cos,
+                sin,
+                plan,
+                record_sink=records,
+            )
+            nodes_q, node_scale = quantize_indexer_nodes(node_kv)
+            if not hasattr(forward_batch, "tree_node_kv"):
+                forward_batch.tree_node_kv = {}
+            forward_batch.tree_node_kv[compressor.layer_id] = nodes_q
+            if not hasattr(forward_batch, "tree_node_scale"):
+                forward_batch.tree_node_scale = {}
+            forward_batch.tree_node_scale[compressor.layer_id] = node_scale
+            key_buffer = self.token_to_kv_pool.get_compress_buffer(
+                compressor.layer_id, True
+            )
+            scale_buffer = self.token_to_kv_pool.get_compress_dequant_scale_buffer(
+                compressor.layer_id, True
+            )
+            table = getattr(fm, f"c{ratio}_page_table")
+            if records is not None and key_buffer is not None:
+                records.append(
+                    record_compressed_nodes(
+                        plan,
+                        original=key_buffer,
+                        node_data=nodes_q,
+                        table=table,
+                        ratio=ratio,
+                    )
+                )
+            if records is not None and scale_buffer is not None:
+                records.append(
+                    record_compressed_nodes(
+                        plan,
+                        original=scale_buffer,
+                        node_data=node_scale.reshape(-1, 1),
+                        table=table,
+                        ratio=ratio,
+                    )
+                )
+            return
+
         # TODO: torch.ops.npu.compressor does not support Atlas A5 yet.
         compressor_op = (
             torch.ops.custom.compressor if is_npu_arch35() else torch.ops.npu.compressor
@@ -858,6 +916,58 @@ class C4IndexerAscendBackendMixin:
         )
         return _apply_hadamard(q, c4_indexer.hadamard_matrix)
 
+    def _forward_tree_indexer(
+        self,
+        c4_indexer,
+        q_quant: torch.Tensor,
+        q_scale: torch.Tensor,
+        k: torch.Tensor,
+        k_scale: torch.Tensor,
+        weights: torch.Tensor,
+        forward_batch: ForwardBatch,
+        tree_plan,
+    ) -> torch.Tensor:
+        from sglang.srt.speculative.dspark_components.tree.indexer import (
+            tree_indexer,
+            tree_indexer_select_all,
+        )
+        from sglang.srt.speculative.dspark_components.tree.node_pool import (
+            build_node_plan,
+        )
+
+        if k.dtype != torch.int8:
+            raise NotImplementedError(
+                "DSpark tree indexer supports INT8 A2/A3 indexer K only; "
+                f"got {k.dtype}."
+            )
+        plan = build_node_plan(tree_plan)
+        topk = self._dsv4_index_topk
+        max_kv = int(plan.start.max().item() + plan.depths.max().item() + 1)
+        if max(1, max_kv // 4) <= topk:
+            return tree_indexer_select_all(plan, topk, q_quant.device).view(-1, topk)
+        nodes = getattr(forward_batch, "tree_node_kv", {}).get(c4_indexer.layer_id)
+        node_scale = getattr(forward_batch, "tree_node_scale", {}).get(
+            c4_indexer.layer_id
+        )
+        if nodes is None or node_scale is None:
+            raise RuntimeError(
+                "DSpark tree indexer requires the indexer compressor node K/scale; "
+                "no node K/scale was produced for this layer."
+            )
+        topk_idxs = tree_indexer(
+            query=q_quant,
+            weights=weights,
+            query_scale=q_scale,
+            history=k,
+            history_scale=k_scale,
+            nodes=nodes,
+            node_scale=node_scale,
+            table=self.forward_metadata.c4_page_table,
+            plan=plan,
+            topk=topk,
+        )
+        return topk_idxs.view(-1, topk)
+
     def _forward_npu_fused(
         self,
         c4_indexer,
@@ -880,6 +990,21 @@ class C4IndexerAscendBackendMixin:
         else:
             q_quant, q_scale = torch_npu.npu_dynamic_quant(q)
             q_scale = q_scale.to(torch.float16)
+
+        tree_plan = getattr(
+            getattr(forward_batch, "spec_info", None), "tree_plan", None
+        )
+        if tree_plan is not None:
+            return self._forward_tree_indexer(
+                c4_indexer,
+                q_quant,
+                q_scale,
+                k,
+                k_scale,
+                weights,
+                forward_batch,
+                tree_plan,
+            )
 
         fm = self.forward_metadata
         li_quant_metadata = fm.kernel_metadata["li_quant_metadata"]
@@ -918,11 +1043,6 @@ class C4IndexerAscendBackendMixin:
     ) -> None:
         if forward_batch.forward_mode.is_idle():
             return
-        if getattr(getattr(forward_batch, "spec_info", None), "tree_plan", None) is not None:
-            raise NotImplementedError(
-                "DSpark tree c4 indexer requires quant_lightning_indexer_tree and "
-                "the per-node K/scale producer; that producer is not wired yet."
-            )
         # skip_compressor=True is the CP full-metadata protocol: the compressor
         # already ran via forward_indexer_compressor.
         self._ensure_npu_c4_indexer(c4_indexer, x.device)

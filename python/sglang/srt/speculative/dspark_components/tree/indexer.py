@@ -32,6 +32,20 @@ def tree_indexer_select_all(plan, topk: int, device) -> torch.Tensor:
     ).unsqueeze(1)
 
 
+def quantize_indexer_nodes(node_kv: torch.Tensor):
+    """Quantize bf16 per-node indexer K to INT8 + FP16 per-node scale.
+
+    Mirrors the indexer's own per-token dynamic quant. The tree op requires
+    ``nodes`` INT8 [n, 128] and ``node_scale`` FP16 [n].
+    """
+    import torch_npu
+
+    flat = node_kv.reshape(-1, node_kv.shape[-1])
+    nodes, scale = torch_npu.npu_dynamic_quant(flat)
+    return nodes.view(node_kv.shape), scale.reshape(-1).to(torch.float16)
+
+
+
 def tree_indexer_metadata(*, query: torch.Tensor, plan, topk: int):
     seq = (plan.start.long() + plan.depths + 1).int()
     lengths, residual = seq // 4, seq % 4
@@ -91,11 +105,11 @@ def tree_indexer(
         history_scale,
         nodes.reshape(query.shape[0], query.shape[2]),
         node_scale,
-        plan.ancestors,
-        plan.start,
-        plan.req_ids,
-        table,
-        plan.query_cu,
+        plan.ancestors.to(torch.int64),
+        plan.start.to(torch.int32),
+        plan.req_ids.to(torch.int64),
+        table.to(torch.int32),
+        plan.query_cu.to(torch.int32),
         lengths,
         residual,
         schedule,

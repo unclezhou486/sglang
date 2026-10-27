@@ -23,7 +23,7 @@ blocks. This package imports only `torch` and `dataclasses`; it never imports
 | `node_pool.py` | DSV4 node KV pipeline: `compress_nodes` (`compressor_tree_project` + `compressor_tree`) and `attend_nodes` (`cmp_tree_kv`). Every node uses its own hidden row. |
 | `node_commit.py` | Triton `freeze_node_pages` / `commit_node_pages` for accepted node rows. |
 | `torch_ops.py` | Loads the three tree binding `.so` files from `SGLANG_DSPARK_TREE_OPS`. |
-| `indexer.py` | Tree c4 indexer adapter (`quant_lightning_indexer_tree`) + select-all shortcut. |
+| `indexer.py` | Tree c4 indexer adapter (`quant_lightning_indexer_tree`), select-all shortcut, and per-node K quantizer. |
 
 ## Contracts
 
@@ -68,9 +68,11 @@ and `MarkovScorer` model API; sglang's Markov head exposes
   move) plus `prepare_nodes` / `commit_nodes` (Triton node-page staging). The
   legacy `apply_tree_commit` hook only runs when a caller supplies a device
   hook.
-- c4 tree indexer: the `quant_lightning_indexer_tree` adapter exists, but the
-  per-node K/scale producer is not wired; `forward_c4_indexer` raises until it
-  lands. This is the remaining end-to-end blocker.
+- c4 tree indexer: `forward_compress` quantizes the per-node K with
+  `npu_dynamic_quant` and stores INT8 `nodes` plus FP16 `node_scale`;
+  `forward_c4_indexer` routes to `quant_lightning_indexer_tree`. The indexer
+  key/scale node rows are recorded for the accepted-path commit. Device
+  validation is still pending.
 - TP-sharded Markov `w2`: rejected (`SGLANG_DSPARK_OPT_MARKOV_W2_TP_SHARD`).
 - Stateful Markov heads, sampling accept, graph capture: rejected in v1.
 - The CPU attention reference is reachable only when

@@ -5,6 +5,7 @@ import torch
 
 from tree.config import resolve_tree_config
 from tree.indexer import (
+    quantize_indexer_nodes,
     tree_indexer,
     tree_indexer_ops_available,
     tree_indexer_select_all,
@@ -34,6 +35,22 @@ def test_select_all_short_history():
     # start=3, depths=0/1/2 -> lengths = 1 for all rows, so only index 0 valid
     assert out[0, 0, 0].item() == 0
     assert out[0, 0, 1].item() == -1
+
+
+def test_quantize_indexer_nodes_is_int8_with_fp16_scale(monkeypatch):
+    import sys
+    import types
+
+    fake = types.ModuleType("torch_npu")
+
+    def npu_dynamic_quant(x):
+        return x.to(torch.int8), x.abs().amax(-1, keepdim=True).float()
+
+    fake.npu_dynamic_quant = npu_dynamic_quant
+    monkeypatch.setitem(sys.modules, "torch_npu", fake)
+    nodes, scale = quantize_indexer_nodes(torch.ones(5, 128))
+    assert nodes.shape == (5, 128) and nodes.dtype == torch.int8
+    assert scale.shape == (5,) and scale.dtype == torch.float16
 
 
 def test_adapter_raises_without_vendor_op(monkeypatch):
