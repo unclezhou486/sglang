@@ -35,6 +35,13 @@ class TestCompressStateWritePad(CustomTestCase):
                     get_compress_state_write_pad(compress_ratio, ring_size), expected
                 )
 
+    def test_c4_ring_grows_for_wide_tree_verify(self):
+        """A 13-row tree verify needs ring_size 32; width 10 still fits ring 16."""
+        self.assertEqual(get_compress_state_ring_size(4, num_draft_tokens=10), 16)
+        ring = get_compress_state_ring_size(4, num_draft_tokens=13)
+        self.assertEqual(ring, 32)
+        self.assertGreaterEqual(get_compress_state_write_pad(4, ring), 13)
+
     def test_pad_is_zero_for_rings_below_one_window(self):
         """Online c128 collapses the ring to 1; the pad must clamp instead of going
         negative."""
