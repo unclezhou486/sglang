@@ -43,6 +43,13 @@ def build_node_plan(pre) -> NodePlan:
     meta = pre.metadata
     n = meta.verify_ids.numel()
     device = meta.verify_ids.device
+    ancestors = meta.tree_ancestors.to(torch.int64)
+    offsets = meta.node_req_ids.to(torch.int64) * meta.query_width
+    ancestors = torch.where(
+        ancestors >= 0,
+        ancestors + offsets[:, None],
+        ancestors,
+    )
     return NodePlan(
         n=n,
         max_q=meta.query_width,
@@ -50,7 +57,7 @@ def build_node_plan(pre) -> NodePlan:
         depths=(meta.positions - meta.tree_prefix.to(meta.positions.dtype)).to(
             torch.int64
         ),
-        ancestors=meta.tree_ancestors.to(torch.int64),
+        ancestors=ancestors,
         req_ids=meta.node_req_ids.to(torch.int64),
         query_cu=meta.node_cu_seqlens_q.to(torch.int32),
         hidden_ids=torch.arange(n, dtype=torch.int64, device=device),
