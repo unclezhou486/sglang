@@ -58,7 +58,20 @@ def _sparse_attn_ops():
 
 def _op_supports_kwarg(op, name: str) -> bool:
     try:
-        return any(arg.name == name for arg in op._schema.arguments)
+        overloads = getattr(op, "overloads", None)
+        if overloads is not None:
+            for overload in overloads():
+                schema = getattr(getattr(op, overload), "_schema", None)
+                if schema is not None and any(
+                    arg.name == name for arg in schema.arguments
+                ):
+                    return True
+            return False
+        schema = getattr(op, "_schema", None)
+        return bool(
+            schema is not None
+            and any(arg.name == name for arg in schema.arguments)
+        )
     except Exception:
         return False
 
