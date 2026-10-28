@@ -1413,6 +1413,9 @@ class DSparkWorkerV2(BaseSpecWorker):
                 tree_positions=(
                     tree_pre.metadata.positions if tree_pre is not None else None
                 ),
+                tree_commit=(
+                    tree_post.commit if tree_post is not None else None
+                ),
             )
         logits_output.hidden_states = None
 
