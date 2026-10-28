@@ -131,6 +131,22 @@ class TestSparseIndices:
         # node2 is depth 2; it sees node1 and itself, not node3
         assert 3 in node2 and 4 in node2 and 5 not in node2
 
+    def test_full_to_swa_mapping_is_applied(self):
+        from tree.layout import build_chain_layout
+
+        layout = build_chain_layout(torch.tensor([[5, 6, 7]]))
+        slots = build_tree_ori_sparse_indices(
+            layout,
+            prefix_lens=torch.tensor([2]),
+            block_table=torch.tensor([[0, 1]]),
+            block_size=4,
+            window=4,
+            budget=3,
+            full_to_swa_mapping=torch.arange(1000) + 1000,
+        )
+        node2 = set(int(x) for x in slots[2, 0] if x >= 0)
+        assert 1003 in node2 and 1004 in node2 and 1005 not in node2
+
 
 class TestAttentionReference:
     def _setup(self):

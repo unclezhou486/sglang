@@ -1168,11 +1168,15 @@ class DSparkWorkerV2(BaseSpecWorker):
                 root_token_ids=draft_block_ids[:, 0],
                 prefix_lens=prefix_lens,
                 block_table=page_table,
-                block_size=self.page_size,
+                # req_to_token is token-level, not a page table.
+                block_size=1,
                 window=self._tree_sliding_window,
                 config=self._tree_config,
                 scorer=DSparkMarkovScorer(
                     self.draft_model.markov_head, self._tree_config.topk
+                ),
+                full_to_swa_mapping=(
+                    self.model_runner.token_to_kv_pool.full_to_swa_index_mapping
                 ),
             )
             verify_ids_2d = tree_pre.metadata.verify_ids.reshape(bs, -1)

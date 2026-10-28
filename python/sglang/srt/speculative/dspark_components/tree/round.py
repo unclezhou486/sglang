@@ -55,6 +55,7 @@ def plan_tree_pre(
     window: int,
     config: TreeConfig,
     scorer=None,
+    full_to_swa_mapping: torch.Tensor | None = None,
 ) -> TreePrePlan:
     """Build topology, per-node verify geometry and sparse ori slots.
 
@@ -85,6 +86,7 @@ def plan_tree_pre(
         block_size=block_size,
         window=window,
         budget=config.budget,
+        full_to_swa_mapping=full_to_swa_mapping,
     )
     return TreePrePlan(layout=layout, metadata=metadata, ori_sparse_indices=sparse)
 

@@ -33,8 +33,14 @@ def build_tree_ori_sparse_indices(
     block_size: int,
     window: int,
     budget: int | None = None,
+    full_to_swa_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Return [T, 1, W] int32 physical slots, W 128-aligned."""
+    """Return [T, 1, W] int32 physical slots, W 128-aligned.
+
+    ``block_table`` indexes the full KV pool. When ``full_to_swa_mapping`` is
+    supplied, each full-pool slot is translated to its SWA slot; the attention
+    op reads ``ori_kv`` from the SWA pool.
+    """
     batch, layout_budget = layout.tokens.shape
     budget = layout_budget if budget is None else int(budget)
     if block_size < 1 or window < 1:
@@ -70,6 +76,9 @@ def build_tree_ori_sparse_indices(
                         f"row sees more positions than slots ({width}) for req={req}, node={node_id}"
                     )
                 page = int(block_table[req, pos // block_size])
-                slot_row[col] = page * block_size + (pos % block_size)
+                full_slot = page * block_size + (pos % block_size)
+                if full_to_swa_mapping is not None:
+                    full_slot = int(full_to_swa_mapping[full_slot])
+                slot_row[col] = full_slot
                 col += 1
     return slots
