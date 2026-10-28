@@ -57,7 +57,7 @@ def build_tree_attn_metadata(*, query, metadata, plan, ratio, window, cmp_sparse
         cmp_ratio=int(ratio),
         ori_mask_mode=4,
         cmp_mask_mode=3,
-        ori_win_left=int(window) - 1,
+        ori_win_left=int(window) + int(metadata.query_width) - 2,
         ori_win_right=0,
         layout_q="TND",
         layout_kv="PA_ND",

@@ -226,7 +226,7 @@ def attend_nodes(
         metadata=metadata_tensor,
         cmp_ratio=ratio,
         softmax_scale=scale,
-        ori_win_left=window - 1,
+        ori_win_left=window + int(metadata.query_width) - 2,
         ori_win_right=0,
     )
 

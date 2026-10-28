@@ -2102,6 +2102,14 @@ class DeepseekV4AscendAttnBackend(
                 fm.actual_seq_lengths_kv = forward_batch.seq_lens.to(torch.int32)
 
         self._init_dspark_sparse_metadata(forward_batch)
+        if tree_plan is not None:
+            # Tree verify needs the root's just-written KV, so the SAS
+            # workspace window must cover the draft width past W-1.
+            fm.ori_win_left = (
+                self._dsv4_sliding_window_size
+                + int(tree_plan.metadata.query_width)
+                - 2
+            )
         fm.kernel_metadata = self._compute_kernel_metadata(forward_batch)
 
         if self._dsv4_compress_ratios:
@@ -2127,6 +2135,11 @@ class DeepseekV4AscendAttnBackend(
             block_tables=fm.block_tables,
             max_seqlen_q=max_seqlen_q,
             is_nextn=False,
+            ori_topk=(
+                int(fm.tree_plan.ori_sparse_indices.shape[-1])
+                if getattr(fm, "tree_plan", None) is not None
+                else 0
+            ),
         )
 
     def _kernel_metadata_from_parts(
@@ -2138,6 +2151,7 @@ class DeepseekV4AscendAttnBackend(
         block_tables: torch.Tensor,
         max_seqlen_q: int,
         is_nextn: bool,
+        ori_topk: int = 0,
     ) -> dict:
         fm = self.forward_metadata
         metadata_op, _ = _sparse_attn_ops()
@@ -2148,6 +2162,7 @@ class DeepseekV4AscendAttnBackend(
             "cmp_ratio": 1,
             "ori_mask_mode": 4,
             "cmp_mask_mode": 3,
+            "ori_topk": int(ori_topk),
             "ori_win_left": getattr(
                 fm, "ori_win_left", self._dsv4_sliding_window_size - 1
             ),
