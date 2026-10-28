@@ -2262,15 +2262,14 @@ class DeepseekV4AscendAttnBackend(
     ) -> torch.Tensor:
         fm = self.forward_metadata
         if getattr(fm, "tree_plan", None) is not None:
-            return self._forward_tree_attention(
+            # SparseAttnSharedkvTree only supports C4 Top-K or full C128 CFA.
+            # SWA-only layers have neither, so they must use the base sparse
+            # attention op with the tree's per-row original-KV indices.
+            return self._forward_tree_swa(
                 q=q,
                 layer=layer,
                 forward_batch=forward_batch,
                 attn_sink=attn_sink,
-                compress_ratio=1,
-                cmp_kv=None,
-                cmp_sparse_indices=None,
-                cmp_block_table=None,
             )
         pool = self.token_to_kv_pool
         ori_kv = pool.get_swa_buffer(layer.layer_id)
@@ -2301,6 +2300,51 @@ class DeepseekV4AscendAttnBackend(
         ori_sparse_indices = getattr(fm, "ori_sparse_indices", None)
         if ori_sparse_indices is not None:
             attn_kwargs["ori_sparse_indices"] = ori_sparse_indices
+        q_arg = attn_kwargs.pop("q")
+        out, _ = attn_op(q_arg, **attn_kwargs)
+        return out
+
+    def _forward_tree_swa(
+        self,
+        *,
+        q: torch.Tensor,
+        layer: RadixAttention,
+        forward_batch: ForwardBatch,
+        attn_sink: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """SWA-only tree attention through the base sparse-attention op.
+
+        ``SparseAttnSharedkvTree`` requires C4 Top-K or full C128 CFA. SWA
+        layers have neither; the tree's per-row ``ori_sparse_indices`` still
+        encode ancestor visibility, so the base op can serve them.
+        """
+        fm = self.forward_metadata
+        tree_plan = fm.tree_plan
+        pool = self.token_to_kv_pool
+        attn_kwargs = dict(
+            **_sparse_attn_kv_quant_kwargs(),
+            cu_seqlens_q=fm.actual_seq_lengths_q_pa,
+            seqused_kv=fm.actual_seq_lengths_kv,
+            ori_mask_mode=4,
+            ori_win_left=getattr(
+                fm, "ori_win_left", self._dsv4_sliding_window_size - 1
+            ),
+            ori_win_right=getattr(fm, "ori_win_right", 0),
+            layout_q="TND",
+            layout_kv="PA_ND",
+            q=q,
+            ori_kv=pool.get_swa_buffer(layer.layer_id),
+            ori_block_table=fm.swa_page_table,
+            sinks=attn_sink,
+            metadata=fm.kernel_metadata["c1a_metadata"],
+            softmax_scale=layer.scaling,
+            cmp_ratio=1,
+            ori_sparse_indices=tree_plan.ori_sparse_indices,
+        )
+        _, attn_op = _sparse_attn_ops()
+        if self._is_dspark_draft_worker:
+            attn_kwargs["cu_seqlens_ori_kv"] = fm.actual_seq_lengths_q_pa
+            attn_op = torch.ops.npu.sparse_attn_sharedkv
         q_arg = attn_kwargs.pop("q")
         out, _ = attn_op(q_arg, **attn_kwargs)
         return out
