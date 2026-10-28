@@ -34,12 +34,15 @@ def build_tree_ori_sparse_indices(
     window: int,
     budget: int | None = None,
     full_to_swa_mapping: torch.Tensor | None = None,
+    draft_slots: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return [T, 1, W] int32 physical slots, W 128-aligned.
 
     ``block_table`` indexes the full KV pool. When ``full_to_swa_mapping`` is
     supplied, each full-pool slot is translated to its SWA slot; the attention
-    op reads ``ori_kv`` from the SWA pool.
+    op reads ``ori_kv`` from the SWA pool. ``draft_slots`` supplies this
+    round's verify write slots for positions at/after the prefix; those rows
+    are not visible in ``req_to_token`` yet.
     """
     batch, layout_budget = layout.tokens.shape
     budget = layout_budget if budget is None else int(budget)
@@ -75,8 +78,16 @@ def build_tree_ori_sparse_indices(
                     raise ValueError(
                         f"row sees more positions than slots ({width}) for req={req}, node={node_id}"
                     )
-                page = int(block_table[req, pos // block_size])
-                full_slot = page * block_size + (pos % block_size)
+                if draft_slots is not None and pos >= prefix:
+                    node = pos - prefix
+                    if node >= draft_slots.shape[1]:
+                        raise ValueError(
+                            f"draft slot column {node} out of range {draft_slots.shape[1]}"
+                        )
+                    full_slot = int(draft_slots[req, node])
+                else:
+                    page = int(block_table[req, pos // block_size])
+                    full_slot = page * block_size + (pos % block_size)
                 if full_to_swa_mapping is not None:
                     full_slot = int(full_to_swa_mapping[full_slot])
                 slot_row[col] = full_slot

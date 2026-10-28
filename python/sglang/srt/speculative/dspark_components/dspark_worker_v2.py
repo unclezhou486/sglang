@@ -1178,6 +1178,7 @@ class DSparkWorkerV2(BaseSpecWorker):
                 full_to_swa_mapping=(
                     self.model_runner.token_to_kv_pool.full_to_swa_index_mapping
                 ),
+                draft_slots=verify_window.verify_cache_loc_2d,
             )
             verify_ids_2d = tree_pre.metadata.verify_ids.reshape(bs, -1)
 

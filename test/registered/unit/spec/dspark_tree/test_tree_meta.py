@@ -147,6 +147,23 @@ class TestSparseIndices:
         node2 = set(int(x) for x in slots[2, 0] if x >= 0)
         assert 1003 in node2 and 1004 in node2 and 1005 not in node2
 
+    def test_draft_slots_override_stale_req_to_token(self):
+        from tree.layout import build_chain_layout
+
+        layout = build_chain_layout(torch.tensor([[5, 6, 7]]))
+        slots = build_tree_ori_sparse_indices(
+            layout,
+            prefix_lens=torch.tensor([2]),
+            block_table=torch.tensor([[0, 1]]),
+            block_size=1,
+            window=4,
+            budget=3,
+            draft_slots=torch.tensor([[100, 101, 102, 103]]),
+        )
+        node2 = set(int(x) for x in slots[2, 0] if x >= 0)
+        assert 100 in node2 and 101 in node2 and 102 in node2
+        assert 2 not in node2 and 3 not in node2
+
 
 class TestAttentionReference:
     def _setup(self):
