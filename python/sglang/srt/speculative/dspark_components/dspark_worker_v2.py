@@ -1260,7 +1260,8 @@ class DSparkWorkerV2(BaseSpecWorker):
                 verify_cache_loc=verify_window.verify_cache_loc,
                 prefix_lens=prefix_lens,
                 block_table=page_table,
-                block_size=self.page_size,
+                # req_to_token is token-level, not a page table.
+                block_size=1,
             )
         can_run_cuda_graph = target_verify.can_run_cuda_graph
         if batch.has_grammar:
