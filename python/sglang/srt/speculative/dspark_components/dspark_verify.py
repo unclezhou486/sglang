@@ -406,6 +406,8 @@ class TargetVerifyExecutor:
             raise RuntimeError("DSpark verify requires target hidden states, got None.")
         hidden = hidden.view(bs, self.verify_num_draft_tokens, -1)
         if tree_commit is not None:
+            if accept_index is None:
+                raise ValueError("tree_commit requires accept_index")
             # Tree KV is committed to root + depth columns.  Rebuild the
             # hidden path in that same order instead of writing source node
             # slots, otherwise a non-first-child path stores hidden and KV at
