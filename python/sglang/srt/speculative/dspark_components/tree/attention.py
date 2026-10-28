@@ -20,6 +20,62 @@ def tree_attn_op_available() -> bool:
         return False
 
 
+def build_tree_attn_metadata(*, query, metadata, plan, ratio, window, cmp_sparse_indices, compressed):
+    """Build the tiling metadata the tree attention op requires.
+
+    Mirrors vllm-ascend's ``native_attention``: the metadata is generated from
+    per-node seqused lengths, and the same ``cu_seqlens_*`` args are passed to
+    the tree op.
+    """
+    seq = metadata.node_seqused_kv.to(torch.int32)
+    cu_ori = torch.cat((seq.new_zeros(1), seq.cumsum(0, dtype=torch.int32)))
+    cu_cmp = torch.cat(
+        (seq.new_zeros(1), (seq // int(ratio)).cumsum(0, dtype=torch.int32))
+    )
+    cmp_topk = (
+        int(cmp_sparse_indices.shape[-1])
+        if cmp_sparse_indices is not None and int(ratio) == 4
+        else 0
+    )
+    kwargs = dict(
+        num_heads_q=query.shape[1],
+        num_heads_kv=1,
+        head_dim=query.shape[2],
+        seqused_q=seq.new_empty(0),
+        batch_size=plan.n,
+        max_seqlen_q=1,
+        max_seqlen_kv=max(1, int(seq.max().item()) if seq.numel() else 0),
+        ori_topk=0,
+        cmp_topk=cmp_topk,
+        has_ori_kv=True,
+        has_cmp_kv=compressed is not None,
+        device=str(query.device),
+        cu_seqlens_q=plan.query_cu,
+        cu_seqlens_ori_kv=cu_ori,
+        cu_seqlens_cmp_kv=cu_cmp,
+        seqused_kv=seq,
+        cmp_ratio=int(ratio),
+        ori_mask_mode=4,
+        cmp_mask_mode=3,
+        ori_win_left=int(window) - 1,
+        ori_win_right=0,
+        layout_q="TND",
+        layout_kv="PA_ND",
+    )
+    custom = getattr(torch.ops, "custom", None)
+    op = getattr(custom, "npu_sparse_attn_sharedkv_metadata", None)
+    if op is None:
+        ascend = getattr(torch.ops, "_C_ascend", None)
+        op = getattr(ascend, "npu_sparse_attn_sharedkv_metadata", None)
+    if op is None:
+        raise RuntimeError(
+            "DSpark tree attention requires "
+            "torch.ops.custom.npu_sparse_attn_sharedkv_metadata (or the "
+            "_C_ascend equivalent); it is unavailable."
+        )
+    return op(**kwargs), cu_ori, cu_cmp
+
+
 def _allow_cpu_reference() -> bool:
     return os.environ.get("SGLANG_DSPARK_TREE_ALLOW_CPU_REFERENCE") == "1"
 

@@ -18,7 +18,11 @@ from dataclasses import dataclass
 
 import torch
 
-from .attention import tree_attention, tree_attn_op_available
+from .attention import (
+    build_tree_attn_metadata,
+    tree_attention,
+    tree_attn_op_available,
+)
 
 
 @dataclass
@@ -184,6 +188,25 @@ def attend_nodes(
             "torch.ops._C_ascend.npu_sparse_attn_sharedkv_tree; "
             "the installed vendor does not expose it."
         )
+    metadata_tensor, cu_ori, cu_cmp = build_tree_attn_metadata(
+        query=query,
+        metadata=metadata,
+        plan=plan,
+        ratio=ratio,
+        window=window,
+        cmp_sparse_indices=cmp_sparse_indices,
+        compressed=compressed,
+    )
+    ori_table = (
+        ori_block_table.index_select(0, plan.req_ids)
+        if ori_block_table is not None
+        else None
+    )
+    cmp_table = (
+        cmp_block_table.index_select(0, plan.req_ids)
+        if cmp_block_table is not None
+        else None
+    )
     return tree_attention(
         q=query,
         ori_kv=original,
@@ -191,13 +214,16 @@ def attend_nodes(
         cmp_tree_kv=node_kv,
         ori_sparse_indices=ori_sparse_indices,
         cmp_sparse_indices=cmp_sparse_indices,
-        ori_block_table=ori_block_table,
-        cmp_block_table=cmp_block_table,
+        ori_block_table=ori_table,
+        cmp_block_table=cmp_table,
         cu_seqlens_q=plan.query_cu,
+        cu_seqlens_ori_kv=cu_ori,
+        cu_seqlens_cmp_kv=cu_cmp,
         seqused_kv=metadata.node_seqused_kv,
         tree_ancestors=plan.ancestors,
         tree_prefix=plan.start,
         sinks=sinks,
+        metadata=metadata_tensor,
         cmp_ratio=ratio,
         softmax_scale=scale,
         ori_win_left=window - 1,
