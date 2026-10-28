@@ -77,13 +77,29 @@ def _op_supports_kwarg(op, name: str) -> bool:
 
 
 def _tree_swa_ops():
-    """Base SAS ops that actually support ``ori_topk`` for tree SWA.
+    """Base SAS ops that support tree SWA ``ori_sparse_indices``.
 
-    The custom vendor metadata op exposes ``ori_topk`` in its schema but the
-    kernel rejects non-zero values. vLLM's ``_C_ascend`` base op is the one
-    that implements tree SWA ``ori_sparse_indices``. Return ``None`` when it
-    is not loaded so the caller fails before an opaque ACLNN failure.
+    Prefer sgl-kernel-npu's standalone ``npu::sparse_attn_sharedkv``. Its
+    tiling reads ``ori_sparse_indices`` directly and its metadata host has no
+    ``ori_topk`` argument. Fall back to vLLM-Ascend's ``_C_ascend`` base only
+    when sgl-kernel-npu is unavailable. The custom vendor op is deliberately
+    not used: its metadata kernel rejects tree ``ori_sparse_indices``.
     """
+    try:
+        import sgl_kernel_npu  # noqa: F401 - registers torch.ops.npu
+    except Exception:
+        pass
+    sgl_attn = getattr(torch.ops.npu, "sparse_attn_sharedkv", None)
+    sgl_meta = getattr(
+        torch.ops.npu, "sparse_attn_sharedkv_metadata_host", None
+    )
+    if (
+        sgl_attn is not None
+        and sgl_meta is not None
+        and _op_supports_kwarg(sgl_attn, "ori_sparse_indices")
+    ):
+        return sgl_meta, sgl_attn
+
     ascend = getattr(torch.ops, "_C_ascend", None)
     if ascend is not None:
         metadata_op = getattr(ascend, "npu_sparse_attn_sharedkv_metadata", None)
@@ -2239,14 +2255,23 @@ class DeepseekV4AscendAttnBackend(
                 tree_ops = _tree_swa_ops()
                 if tree_ops is None:
                     raise RuntimeError(
-                        "DSpark tree SWA requires _C_ascend "
-                        "npu_sparse_attn_sharedkv + metadata with ori_topk; "
-                        "the custom vendor metadata does not support it."
+                        "DSpark tree SWA requires sgl-kernel-npu's "
+                        "sparse_attn_sharedkv or _C_ascend base op with "
+                        "ori_sparse_indices support."
                     )
                 metadata_op, _ = tree_ops
-                c1a_kwargs["ori_topk"] = int(ori_topk)
-                if _op_supports_kwarg(metadata_op, "device"):
-                    c1a_kwargs["device"] = str(actual_seq_lengths_q_pa.device)
+                if metadata_op is getattr(
+                    torch.ops.npu, "sparse_attn_sharedkv_metadata_host", None
+                ):
+                    c1a_kwargs = c1a_kwargs | {
+                        "cu_seqlens_q": fm.actual_seq_lengths_q_pa_cpu,
+                        "seqused_kv": fm.seq_lens_cpu_int[:bs].int(),
+                        "batch_size": bs,
+                    }
+                else:
+                    c1a_kwargs["ori_topk"] = int(ori_topk)
+                    if _op_supports_kwarg(metadata_op, "device"):
+                        c1a_kwargs["device"] = str(actual_seq_lengths_q_pa.device)
             else:
                 metadata_op, _ = _sparse_attn_ops()
         c1a_metadata = metadata_op(**c1a_kwargs)
@@ -2263,6 +2288,13 @@ class DeepseekV4AscendAttnBackend(
                 for key, value in c1a_kwargs.items()
                 if key not in ("ori_topk", "device")
             } | c4a_overrides
+            if tree_swa:
+                c4a_kwargs.update(
+                    {
+                        "cu_seqlens_q": actual_seq_lengths_q_pa,
+                        "seqused_kv": actual_seq_lengths_kv,
+                    }
+                )
             metadata_op, _ = _sparse_attn_ops()
             kernel_metadata["c4a_metadata"] = metadata_op(**c4a_kwargs)
 
@@ -2296,6 +2328,13 @@ class DeepseekV4AscendAttnBackend(
                 for key, value in c1a_kwargs.items()
                 if key not in ("ori_topk", "device")
             } | c128a_overrides
+            if tree_swa:
+                c128a_kwargs.update(
+                    {
+                        "cu_seqlens_q": actual_seq_lengths_q_pa,
+                        "seqused_kv": actual_seq_lengths_kv,
+                    }
+                )
             metadata_op, _ = _sparse_attn_ops()
             kernel_metadata["c128a_metadata"] = metadata_op(**c128a_kwargs)
 
