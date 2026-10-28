@@ -540,6 +540,13 @@ class CompressorAscendBackendMixin:
             )
 
             plan = build_node_plan(tree_plan)
+            # compressor_tree indexes `state` by page id:
+            #   offset = page * pageStride + row * rowStride
+            # _build_explicit_state_block_table returns flat state-row locs,
+            # so convert them before handing the table to the tree kernel.
+            state_page_size = int(state_cache.shape[1])
+            if not is_npu_arch35() and state_page_size > 1:
+                state_block_table = state_block_table // state_page_size
             node_kv, _ = compress_nodes(
                 compressor,
                 x,
