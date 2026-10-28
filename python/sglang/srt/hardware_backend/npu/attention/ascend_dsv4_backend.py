@@ -2293,6 +2293,10 @@ class DeepseekV4AscendAttnBackend(
                     {
                         "cu_seqlens_q": actual_seq_lengths_q_pa,
                         "seqused_kv": actual_seq_lengths_kv,
+                        # Tree compressed layers use tree_plan.metadata; this
+                        # c4a tensor only satisfies the base-path lookup.
+                        "ori_win_left": self._dsv4_sliding_window_size - 1,
+                        "ori_win_right": 0,
                     }
                 )
             metadata_op, _ = _sparse_attn_ops()
@@ -2333,6 +2337,8 @@ class DeepseekV4AscendAttnBackend(
                     {
                         "cu_seqlens_q": actual_seq_lengths_q_pa,
                         "seqused_kv": actual_seq_lengths_kv,
+                        "ori_win_left": self._dsv4_sliding_window_size - 1,
+                        "ori_win_right": 0,
                     }
                 )
             metadata_op, _ = _sparse_attn_ops()
