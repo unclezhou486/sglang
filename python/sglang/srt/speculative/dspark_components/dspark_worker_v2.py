@@ -1258,7 +1258,7 @@ class DSparkWorkerV2(BaseSpecWorker):
             tree_post = plan_tree_post(
                 pre=tree_pre,
                 target_predict=target_predict,
-                verify_cache_loc=verify_window.verify_cache_loc,
+                verify_cache_loc=verify_window.verify_cache_loc_2d,
                 prefix_lens=prefix_lens,
                 block_table=page_table,
                 # req_to_token is token-level, not a page table.
