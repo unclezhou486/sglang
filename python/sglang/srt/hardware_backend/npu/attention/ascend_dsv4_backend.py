@@ -152,6 +152,51 @@ def _apply_hadamard(inp: torch.Tensor, hadamard_matrix: torch.Tensor) -> torch.T
     return flat.matmul(hadamard_matrix).view(init_shape).to(torch.bfloat16)
 
 
+def _build_full_state_page_table(
+    *,
+    compress_ratio: int,
+    state_pool,
+    token_to_kv_pool,
+    req_to_token: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    start_pos: torch.Tensor,
+    max_input_capacity: int,
+) -> torch.Tensor:
+    """Absolute state page table for the tree compressor/commit kernels.
+
+    The tree `compressor_tree` and `freeze_node_pages` kernels index the
+    table by absolute position // page_rows.  `_build_explicit_state_block_table`
+    is a sliding-window table whose column zero is `start_pos - history`;
+    feeding it to those kernels shifts every page lookup.
+    """
+    state_cache = state_pool.state_cache_3d
+    rows = int(state_cache.shape[1])
+    if rows <= 1:
+        raise RuntimeError("tree state page table requires page_size > 1")
+    max_prefix = int(start_pos.max().item())
+    width = max(1, (max_prefix + int(max_input_capacity) + rows - 1) // rows)
+    columns = torch.arange(width, dtype=torch.int64, device=req_to_token.device)
+    positions = columns.unsqueeze(0) * rows
+    positions = positions.expand(req_pool_indices.numel(), -1)
+    safe_positions = positions.clamp(0, req_to_token.shape[1] - 1)
+    valid = positions < req_to_token.shape[1]
+
+    if compress_ratio == 4:
+        full_locs = req_to_token[
+            req_pool_indices.to(torch.int64)[:, None], safe_positions
+        ]
+        valid &= full_locs >= 0
+        swa_locs = token_to_kv_pool.translate_loc_from_full_to_swa(full_locs)
+        state_locs = state_pool.translate_from_swa_loc_to_state_loc(swa_locs)
+    else:
+        state_locs = state_pool.translate_from_req_position_to_state_loc(
+            req_pool_indices.to(torch.int64)[:, None], positions
+        )
+    page = state_locs // rows
+    dummy_page = int(state_pool.dummy_state_loc) // rows
+    return torch.where(valid, page, dummy_page).to(torch.int32).contiguous()
+
+
 def _build_explicit_state_block_table(
     *,
     compress_ratio: int,
@@ -519,18 +564,37 @@ class CompressorAscendBackendMixin:
                 )
             state_block_table = table_cache[ratio]
 
-        cos, sin = Dsv4NpuRoPE.for_freqs(
-            compressor.freqs_cis, getattr(compressor, "rotary_emb", None)
-        ).get_cos_sin(
-            getattr(fm, f"positions_cmp_padding_c{ratio}"),
-            torch.float32,
-            view_4d=False,
-            allow_build=False,
-        )
-
         tree_plan = getattr(
             getattr(forward_batch, "spec_info", None), "tree_plan", None
         )
+        rope = Dsv4NpuRoPE.for_freqs(
+            compressor.freqs_cis, getattr(compressor, "rotary_emb", None)
+        )
+        if tree_plan is not None:
+            # compressor_tree indexes RoPE by absolute start+depth. It needs
+            # the full position table, not a chain-shaped gathered subset.
+            cos, sin = rope.ensure_tables(torch.float32, allow_build=False)
+        else:
+            cos, sin = rope.get_cos_sin(
+                getattr(fm, f"positions_cmp_padding_c{ratio}"),
+                torch.float32,
+                view_4d=False,
+                allow_build=False,
+            )
+
+        if tree_plan is not None and not is_npu_arch35():
+            # compressor_tree and the ratio=1 node commit index the state
+            # table by absolute position; replace the non-tree window table.
+            state_block_table = _build_full_state_page_table(
+                compress_ratio=ratio,
+                state_pool=state_pool,
+                token_to_kv_pool=self.token_to_kv_pool,
+                req_to_token=self.req_to_token,
+                req_pool_indices=forward_batch.req_pool_indices,
+                start_pos=fm.start_pos,
+                max_input_capacity=fm.dsv4_max_input_capacity,
+            )
+
         if tree_plan is not None and not bool(
             getattr(compressor, "is_in_indexer", False)
         ):
@@ -540,13 +604,6 @@ class CompressorAscendBackendMixin:
             )
 
             plan = build_node_plan(tree_plan)
-            # compressor_tree indexes `state` by page id:
-            #   offset = page * pageStride + row * rowStride
-            # _build_explicit_state_block_table returns flat state-row locs,
-            # so convert them before handing the table to the tree kernel.
-            state_page_size = int(state_cache.shape[1])
-            if not is_npu_arch35() and state_page_size > 1:
-                state_block_table = state_block_table // state_page_size
             node_kv, _ = compress_nodes(
                 compressor,
                 x,
