@@ -45,7 +45,6 @@ def build_tree_attn_metadata(*, query, metadata, plan, ratio, window, cmp_sparse
         batch_size=plan.n,
         max_seqlen_q=1,
         max_seqlen_kv=max(1, int(seq.max().item()) if seq.numel() else 0),
-        ori_topk=0,
         cmp_topk=cmp_topk,
         has_ori_kv=True,
         has_cmp_kv=compressed is not None,

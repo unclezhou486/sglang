@@ -56,6 +56,13 @@ def _sparse_attn_ops():
     )
 
 
+def _op_supports_kwarg(op, name: str) -> bool:
+    try:
+        return any(arg.name == name for arg in op._schema.arguments)
+    except Exception:
+        return False
+
+
 def _sparse_attn_kv_quant_kwargs() -> dict:
     """Extra kwargs the A5 kv-quant kernels need to interpret the KV layout."""
     if not is_npu_arch35():
@@ -2162,7 +2169,6 @@ class DeepseekV4AscendAttnBackend(
             "cmp_ratio": 1,
             "ori_mask_mode": 4,
             "cmp_mask_mode": 3,
-            "ori_topk": int(ori_topk),
             "ori_win_left": getattr(
                 fm, "ori_win_left", self._dsv4_sliding_window_size - 1
             ),
@@ -2194,6 +2200,8 @@ class DeepseekV4AscendAttnBackend(
                 "seqused_kv": actual_seq_lengths_kv,
             }
             metadata_op, _ = _sparse_attn_ops()
+        if ori_topk and _op_supports_kwarg(metadata_op, "ori_topk"):
+            c1a_kwargs["ori_topk"] = int(ori_topk)
         c1a_metadata = metadata_op(**c1a_kwargs)
         kernel_metadata = {"c1a_metadata": c1a_metadata}
 
@@ -2203,6 +2211,8 @@ class DeepseekV4AscendAttnBackend(
                 "has_cmp_kv": True,
                 "cmp_topk": self._dsv4_index_topk,
             }
+            if _op_supports_kwarg(metadata_op, "ori_topk"):
+                c4a_overrides["ori_topk"] = 0
             c4a_kwargs = c1a_kwargs | c4a_overrides
             metadata_op, _ = _sparse_attn_ops()
             kernel_metadata["c4a_metadata"] = metadata_op(**c4a_kwargs)
@@ -2232,6 +2242,8 @@ class DeepseekV4AscendAttnBackend(
 
         if self._dsv4_has_c128:
             c128a_overrides = {"cmp_ratio": 128, "has_cmp_kv": True}
+            if _op_supports_kwarg(metadata_op, "ori_topk"):
+                c128a_overrides["ori_topk"] = 0
             c128a_kwargs = c1a_kwargs | c128a_overrides
             metadata_op, _ = _sparse_attn_ops()
             kernel_metadata["c128a_metadata"] = metadata_op(**c128a_kwargs)
