@@ -45,10 +45,12 @@ def build_node_plan(pre) -> NodePlan:
     device = meta.verify_ids.device
     ancestors = meta.tree_ancestors.to(torch.int64)
     offsets = meta.node_req_ids.to(torch.int64) * meta.query_width
+    # vLLM's build_ancestors uses the request's root node for padding, not
+    # -1; vendor tree indexer/attention gather this table directly.
     ancestors = torch.where(
         ancestors >= 0,
         ancestors + offsets[:, None],
-        ancestors,
+        offsets[:, None],
     )
     return NodePlan(
         n=n,

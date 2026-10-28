@@ -39,7 +39,10 @@ def test_node_plan_matches_metadata():
     assert plan.depths.tolist() == [
         int(p) - int(s) for p, s in zip(meta.positions, meta.tree_prefix)
     ]
-    assert torch.equal(plan.ancestors, meta.tree_ancestors.long())
+    assert torch.equal(
+        plan.ancestors,
+        torch.where(meta.tree_ancestors >= 0, meta.tree_ancestors, 0),
+    )
     assert plan.query_cu.tolist() == list(range(plan.n + 1))
     # Every node uses its own hidden row (vllm Hidden[node] = node).
     assert plan.hidden_ids.tolist() == list(range(plan.n))
@@ -62,9 +65,10 @@ def test_node_plan_globalizes_ancestors_per_request():
     expected = torch.where(
         meta.tree_ancestors >= 0,
         meta.tree_ancestors + offsets[:, None],
-        meta.tree_ancestors,
+        offsets[:, None],
     )
     assert torch.equal(plan.ancestors, expected)
+    assert bool((plan.ancestors >= 0).all())
 
 
 def test_globalize_winners_offsets_second_request():
