@@ -76,6 +76,28 @@ def _op_supports_kwarg(op, name: str) -> bool:
         return False
 
 
+def _tree_swa_ops():
+    """Base SAS ops that actually support ``ori_topk`` for tree SWA.
+
+    The custom vendor metadata op exposes ``ori_topk`` in its schema but the
+    kernel rejects non-zero values. vLLM's ``_C_ascend`` base op is the one
+    that implements tree SWA ``ori_sparse_indices``. Return ``None`` when it
+    is not loaded so the caller fails before an opaque ACLNN failure.
+    """
+    ascend = getattr(torch.ops, "_C_ascend", None)
+    if ascend is not None:
+        metadata_op = getattr(ascend, "npu_sparse_attn_sharedkv_metadata", None)
+        attention_op = getattr(ascend, "npu_sparse_attn_sharedkv", None)
+        if (
+            metadata_op is not None
+            and attention_op is not None
+            and _op_supports_kwarg(metadata_op, "ori_topk")
+            and _op_supports_kwarg(attention_op, "ori_sparse_indices")
+        ):
+            return metadata_op, attention_op
+    return None
+
+
 def _sparse_attn_kv_quant_kwargs() -> dict:
     """Extra kwargs the A5 kv-quant kernels need to interpret the KV layout."""
     if not is_npu_arch35():
@@ -2198,6 +2220,7 @@ class DeepseekV4AscendAttnBackend(
             "has_cmp_kv": False,
         }
         c1a_kwargs = base_kwargs | common
+        tree_swa = getattr(fm, "tree_plan", None) is not None
         if self._is_dspark_draft_worker:
             cu_q_cpu = fm.actual_seq_lengths_q_pa_cpu
             if cu_q_cpu is not None and cu_q_cpu.numel() > bs + 1:
@@ -2212,9 +2235,20 @@ class DeepseekV4AscendAttnBackend(
                 "cu_seqlens_q": actual_seq_lengths_q_pa,
                 "seqused_kv": actual_seq_lengths_kv,
             }
-            metadata_op, _ = _sparse_attn_ops()
-        if ori_topk and _op_supports_kwarg(metadata_op, "ori_topk"):
-            c1a_kwargs["ori_topk"] = int(ori_topk)
+            if tree_swa:
+                tree_ops = _tree_swa_ops()
+                if tree_ops is None:
+                    raise RuntimeError(
+                        "DSpark tree SWA requires _C_ascend "
+                        "npu_sparse_attn_sharedkv + metadata with ori_topk; "
+                        "the custom vendor metadata does not support it."
+                    )
+                metadata_op, _ = tree_ops
+                c1a_kwargs["ori_topk"] = int(ori_topk)
+                if _op_supports_kwarg(metadata_op, "device"):
+                    c1a_kwargs["device"] = str(actual_seq_lengths_q_pa.device)
+            else:
+                metadata_op, _ = _sparse_attn_ops()
         c1a_metadata = metadata_op(**c1a_kwargs)
         kernel_metadata = {"c1a_metadata": c1a_metadata}
 
@@ -2224,9 +2258,11 @@ class DeepseekV4AscendAttnBackend(
                 "has_cmp_kv": True,
                 "cmp_topk": self._dsv4_index_topk,
             }
-            if _op_supports_kwarg(metadata_op, "ori_topk"):
-                c4a_overrides["ori_topk"] = 0
-            c4a_kwargs = c1a_kwargs | c4a_overrides
+            c4a_kwargs = {
+                key: value
+                for key, value in c1a_kwargs.items()
+                if key not in ("ori_topk", "device")
+            } | c4a_overrides
             metadata_op, _ = _sparse_attn_ops()
             kernel_metadata["c4a_metadata"] = metadata_op(**c4a_kwargs)
 
@@ -2255,9 +2291,11 @@ class DeepseekV4AscendAttnBackend(
 
         if self._dsv4_has_c128:
             c128a_overrides = {"cmp_ratio": 128, "has_cmp_kv": True}
-            if _op_supports_kwarg(metadata_op, "ori_topk"):
-                c128a_overrides["ori_topk"] = 0
-            c128a_kwargs = c1a_kwargs | c128a_overrides
+            c128a_kwargs = {
+                key: value
+                for key, value in c1a_kwargs.items()
+                if key not in ("ori_topk", "device")
+            } | c128a_overrides
             metadata_op, _ = _sparse_attn_ops()
             kernel_metadata["c128a_metadata"] = metadata_op(**c128a_kwargs)
 
@@ -2381,10 +2419,18 @@ class DeepseekV4AscendAttnBackend(
             cmp_ratio=1,
             ori_sparse_indices=tree_plan.ori_sparse_indices,
         )
-        _, attn_op = _sparse_attn_ops()
-        if self._is_dspark_draft_worker:
+        tree_ops = _tree_swa_ops()
+        if tree_ops is None:
+            raise RuntimeError(
+                "DSpark tree SWA requires _C_ascend "
+                "npu_sparse_attn_sharedkv with ori_sparse_indices support; "
+                "the custom vendor op does not implement tree ori indexing."
+            )
+        _, attn_op = tree_ops
+        if self._is_dspark_draft_worker and _op_supports_kwarg(
+            attn_op, "cu_seqlens_ori_kv"
+        ):
             attn_kwargs["cu_seqlens_ori_kv"] = fm.actual_seq_lengths_q_pa
-            attn_op = torch.ops.npu.sparse_attn_sharedkv
         q_arg = attn_kwargs.pop("q")
         out, _ = attn_op(q_arg, **attn_kwargs)
         return out
