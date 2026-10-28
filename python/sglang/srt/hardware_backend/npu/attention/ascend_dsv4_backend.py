@@ -2508,6 +2508,24 @@ class DeepseekV4AscendAttnBackend(
         fm = self.forward_metadata
         tree_plan = fm.tree_plan
         pool = self.token_to_kv_pool
+        ori_sparse_indices = tree_plan.ori_sparse_indices
+        if ori_sparse_indices.shape[0] != q.shape[0]:
+            if ori_sparse_indices.shape[0] > q.shape[0]:
+                raise ValueError(
+                    "tree SWA sparse rows exceed query rows: "
+                    f"{ori_sparse_indices.shape[0]} > {q.shape[0]}"
+                )
+            pad = torch.full(
+                (
+                    q.shape[0] - ori_sparse_indices.shape[0],
+                    ori_sparse_indices.shape[1],
+                    ori_sparse_indices.shape[2],
+                ),
+                -1,
+                dtype=ori_sparse_indices.dtype,
+                device=ori_sparse_indices.device,
+            )
+            ori_sparse_indices = torch.cat([ori_sparse_indices, pad], dim=0)
         attn_kwargs = dict(
             **_sparse_attn_kv_quant_kwargs(),
             cu_seqlens_q=fm.actual_seq_lengths_q_pa,
@@ -2526,7 +2544,7 @@ class DeepseekV4AscendAttnBackend(
             metadata=fm.kernel_metadata["c1a_metadata"],
             softmax_scale=layer.scaling,
             cmp_ratio=1,
-            ori_sparse_indices=tree_plan.ori_sparse_indices,
+            ori_sparse_indices=ori_sparse_indices,
         )
         tree_ops = _tree_swa_ops()
         if tree_ops is None:
