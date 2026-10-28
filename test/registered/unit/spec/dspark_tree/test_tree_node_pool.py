@@ -8,6 +8,7 @@ from tree.node_pool import (
     build_node_descriptors,
     build_node_plan,
     compress_nodes,
+    globalize_winners,
     prepare_nodes,
     record_compressed_nodes,
     tree_compressor_ops_available,
@@ -64,6 +65,23 @@ def test_node_plan_globalizes_ancestors_per_request():
         meta.tree_ancestors,
     )
     assert torch.equal(plan.ancestors, expected)
+
+
+def test_globalize_winners_offsets_second_request():
+    cfg = resolve_tree_config(enable=True, topk=2, budget=4, depth=3)
+    pre = plan_tree_pre(
+        base_logits=torch.zeros(2, 3, 8),
+        root_token_ids=torch.tensor([1, 2]),
+        prefix_lens=torch.tensor([3, 5]),
+        block_table=torch.tensor([[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]]),
+        block_size=4,
+        window=4,
+        config=cfg,
+    )
+    plan = build_node_plan(pre)
+    winners = torch.tensor([1, 2], dtype=torch.long)
+    expected = torch.tensor([1, plan.max_q + 2], dtype=torch.long)
+    assert torch.equal(globalize_winners(plan, winners), expected)
 
 
 def test_device_boundary_is_explicit():

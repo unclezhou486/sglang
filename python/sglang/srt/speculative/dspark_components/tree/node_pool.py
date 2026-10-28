@@ -347,8 +347,22 @@ def build_node_descriptors(records: list[NodeRecord]):
     return descriptors, total, max_rows
 
 
+def globalize_winners(plan: NodePlan, winners: torch.Tensor) -> torch.Tensor:
+    """Map per-request endpoint node ids to flat verify-row ids.
+
+    ``acceptance.endpoint_node`` is request-local (0..query_width-1). The
+    commit kernel indexes ``Depths`` / ``Ancestors`` by flat row, so every
+    request after the first needs its row offset added.
+    """
+    offsets = torch.arange(
+        winners.numel(), dtype=winners.dtype, device=winners.device
+    ) * int(plan.max_q)
+    return winners + offsets
+
+
 def prepare_nodes(plan: NodePlan, records: list[NodeRecord], winners, active, device):
     """Freeze accepted node rows into staging before touching the live cache."""
+    winners = globalize_winners(plan, winners)
     try:
         from .node_commit import freeze_node_pages
     except ModuleNotFoundError as exc:
