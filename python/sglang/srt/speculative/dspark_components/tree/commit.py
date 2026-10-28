@@ -89,6 +89,11 @@ def move_swa_kv(pool, plan: TreeCommitPlan) -> None:
     dest = plan.dest_slots[mask].to(torch.int64)
     src_swa = pool.translate_loc_from_full_to_swa(source)
     dst_swa = pool.translate_loc_from_full_to_swa(dest)
+    valid = (src_swa >= 0) & (dst_swa >= 0)
+    if not bool(valid.any()):
+        return
+    src_swa = src_swa[valid]
+    dst_swa = dst_swa[valid]
     for layer_id in range(int(pool.layer_num)):
         buffer = pool.get_swa_buffer(layer_id)
         flat = buffer.flatten(0, 1)
