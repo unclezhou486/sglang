@@ -54,14 +54,15 @@ def plan_tree_commit(
         prefix = int(prefix_lens[req])
         source_rows[req, 0] = verify_cache_loc[req, 0]
         dest_positions[req, 0] = prefix
-        dest_slots[req, 0] = _slot_of(block_table, req, prefix, block_size)
+        # The target verify already wrote the root/path rows into this
+        # window.  Use those columns as destinations instead of re-reading
+        # req_to_token, whose tree-depth columns may still be -1.
+        dest_slots[req, 0] = verify_cache_loc[req, 0]
         for depth in range(int(num_accepted[req])):
             node = int(path_node_ids[req, depth])
             source_rows[req, depth + 1] = verify_cache_loc[req, node]
             dest_positions[req, depth + 1] = prefix + depth + 1
-            dest_slots[req, depth + 1] = _slot_of(
-                block_table, req, prefix + depth + 1, block_size
-            )
+            dest_slots[req, depth + 1] = verify_cache_loc[req, depth + 1]
 
     commit_lens = num_accepted + 1
     new_seq_lens = prefix_lens.to(torch.int64) + commit_lens

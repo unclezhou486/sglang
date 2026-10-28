@@ -269,7 +269,7 @@ class TestCommitPlan:
         )
         assert plan.source_rows.tolist() == [[100, 101, 103]]
         assert plan.dest_positions.tolist() == [[10, 11, 12]]
-        assert plan.dest_slots.tolist() == [[10, 11, 12]]
+        assert plan.dest_slots.tolist() == [[100, 101, 102]]
         assert plan.commit_lens.tolist() == [3]
         assert plan.new_seq_lens.tolist() == [13]
 
