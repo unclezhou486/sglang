@@ -1064,6 +1064,15 @@ class C4IndexerAscendBackendMixin:
             )
         plan = build_node_plan(tree_plan)
         topk = self._dsv4_index_topk
+        n = plan.n
+        if q_quant.shape[0] < n:
+            raise ValueError(
+                f"tree indexer query rows {q_quant.shape[0]} < plan.n {n}"
+            )
+        if q_quant.shape[0] > n:
+            q_quant = q_quant[:n]
+            q_scale = q_scale[:n]
+            weights = weights[:n]
         max_kv = int(plan.start.max().item() + plan.depths.max().item() + 1)
         if max(1, max_kv // 4) <= topk:
             return tree_indexer_select_all(plan, topk, q_quant.device).view(-1, topk)
@@ -2672,13 +2681,18 @@ class DeepseekV4AscendAttnBackend(
                 f"tree compressed layer {layer.layer_id} has no node KV; "
                 "the compressor must run before attention."
             )
-        return attend_nodes(
-            query=q,
+        plan = build_node_plan(tree_plan)
+        n = plan.n
+        if q.shape[0] < n:
+            raise ValueError(f"tree attention query rows {q.shape[0]} < plan.n {n}")
+        tree_q = q[:n]
+        out = attend_nodes(
+            query=tree_q,
             original=self.token_to_kv_pool.get_swa_buffer(layer.layer_id),
             compressed=cmp_kv,
             node_kv=node_kv,
             metadata=tree_plan.metadata,
-            plan=build_node_plan(tree_plan),
+            plan=plan,
             ori_sparse_indices=tree_plan.ori_sparse_indices,
             cmp_sparse_indices=cmp_sparse_indices,
             ori_block_table=fm.swa_page_table,
@@ -2688,6 +2702,11 @@ class DeepseekV4AscendAttnBackend(
             window=self._dsv4_sliding_window_size,
             scale=layer.scaling,
         )
+        if q.shape[0] > n:
+            out = torch.cat(
+                [out, out.new_zeros((q.shape[0] - n, *out.shape[1:]))], dim=0
+            )
+        return out
 
     def get_swa_out_cache_loc(self, forward_batch: ForwardBatch) -> torch.Tensor:
         """Return the SWA KV write locations used by DeepSeek-V4 draft layers.

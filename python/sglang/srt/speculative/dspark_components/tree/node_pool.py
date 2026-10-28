@@ -108,11 +108,14 @@ def compress_nodes(
                 f"compressor is missing {name}; call the backend's "
                 "_ensure_fused_caches() before tree compression."
             )
-    if hidden.shape[0] != plan.n:
+    if hidden.shape[0] < plan.n:
         raise ValueError(
-            f"tree node hidden rows {hidden.shape[0]} != plan.n {plan.n}; "
-            "the target verify must produce one hidden row per tree node."
+            f"tree node hidden rows {hidden.shape[0]} < plan.n {plan.n}; "
+            "the target verify did not produce every tree node."
         )
+    if hidden.shape[0] > plan.n:
+        # Target verify pads the attention-TP tail with unused rows.
+        hidden = hidden[: plan.n]
     if plan.ancestors.shape[0] != plan.n:
         raise ValueError("ancestors row count must equal plan.n")
     coff = 1 + int(module.overlap)
