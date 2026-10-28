@@ -157,8 +157,6 @@ def build_tree_attn_kwargs(
     if missing:
         raise ValueError(f"missing tree attention inputs: {missing}")
     cmp_tree_kv = kwargs.pop("cmp_tree_kv", None)
-    tree_ancestors = kwargs.pop("tree_ancestors", None)
-    tree_prefix = kwargs.pop("tree_prefix", None)
     if cmp_tree_kv is not None:
         if tree_ancestors is None or tree_prefix is None:
             raise ValueError(

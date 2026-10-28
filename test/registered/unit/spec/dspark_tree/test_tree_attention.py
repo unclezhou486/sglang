@@ -33,3 +33,11 @@ def test_cmp_tree_kv_requires_ancestors_and_prefix():
     kwargs["tree_ancestors"] = None
     with pytest.raises(ValueError, match="tree_ancestors"):
         build_tree_attn_kwargs(**kwargs)
+
+
+def test_cmp_tree_kv_keeps_explicit_ancestors_and_prefix():
+    kwargs = _base_kwargs()
+    kwargs["cmp_tree_kv"] = torch.zeros(9, 8)
+    out = build_tree_attn_kwargs(**kwargs)
+    assert out["tree_ancestors"] is not None
+    assert out["tree_prefix"] is not None
