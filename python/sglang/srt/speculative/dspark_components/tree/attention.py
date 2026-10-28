@@ -153,12 +153,24 @@ def build_tree_attn_kwargs(
         "ori_sparse_indices": ori_sparse_indices,
         "cu_seqlens_q": cu_seqlens_q,
         "seqused_kv": seqused_kv,
-        "tree_ancestors": tree_ancestors,
-        "tree_prefix": tree_prefix,
     }
     missing = [name for name, value in required.items() if value is None]
     if missing:
         raise ValueError(f"missing tree attention inputs: {missing}")
+    cmp_tree_kv = kwargs.pop("cmp_tree_kv", None)
+    tree_ancestors = kwargs.pop("tree_ancestors", None)
+    tree_prefix = kwargs.pop("tree_prefix", None)
+    if cmp_tree_kv is not None:
+        if tree_ancestors is None or tree_prefix is None:
+            raise ValueError(
+                "tree attention requires tree_ancestors and tree_prefix when "
+                "cmp_tree_kv is supplied"
+            )
+    else:
+        # SWA-only layers have no compressed tree KV. The op's CheckFeature
+        # requires cmp_tree_kv / ancestors / prefixes to be all-or-none.
+        tree_ancestors = None
+        tree_prefix = None
     out = dict(required)
     out.update(
         cmp_kv=kwargs.pop("cmp_kv", None),
@@ -167,7 +179,9 @@ def build_tree_attn_kwargs(
         cmp_block_table=kwargs.pop("cmp_block_table", None),
         sinks=kwargs.pop("sinks", None),
         metadata=kwargs.pop("metadata", None),
-        cmp_tree_kv=kwargs.pop("cmp_tree_kv", None),
+        cmp_tree_kv=cmp_tree_kv,
+        tree_ancestors=tree_ancestors,
+        tree_prefix=tree_prefix,
         cu_seqlens_ori_kv=kwargs.pop("cu_seqlens_ori_kv", None),
         cu_seqlens_cmp_kv=kwargs.pop("cu_seqlens_cmp_kv", None),
         cmp_ratio=int(cmp_ratio),
