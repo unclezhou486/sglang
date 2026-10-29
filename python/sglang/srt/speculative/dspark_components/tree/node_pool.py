@@ -23,6 +23,7 @@ from .attention import (
     tree_attention,
     tree_attn_op_available,
 )
+from .backend import tree_backend
 
 
 @dataclass
@@ -99,7 +100,8 @@ def compress_nodes(
     ``norm``, ``_fused_wkv_w``, ``_fused_wgate_w``, ``_fused_norm_weight_fp32``.
     Returns ``(node_kv [n, head] bf16, nodes [(n+1), 1, 1, 2*coff*head] fp32)``.
     """
-    if not tree_compressor_ops_available():
+    backend = tree_backend()
+    if backend != "sgl_kernel_npu" and not tree_compressor_ops_available():
         raise NotImplementedError(
             "DSpark tree mode requires torch.ops._C_ascend.compressor_tree / "
             "compressor_tree_project; the installed vendor does not expose them."
@@ -127,30 +129,67 @@ def compress_nodes(
         (plan.n + 1, 1, 1, 2 * coff * head), dtype=torch.float32, device=device
     )
     residue = ((plan.start.long() + plan.depths) % int(module.ratio)).to(torch.int32)
-    torch.ops._C_ascend.compressor_tree_project(
-        hidden.index_select(0, plan.hidden_ids),
-        module._fused_wkv_w,
-        module._fused_wgate_w,
-        nodes,
-        module.ape,
-        residue,
-        plan.query_cu,
-    )
-    node_kv = torch.ops._C_ascend.compressor_tree(
-        state,
-        nodes,
-        module._fused_norm_weight_fp32,
-        cos,
-        sin,
-        table,
-        plan.start,
-        plan.ancestors,
-        plan.depths,
-        plan.req_ids,
-        int(module.ratio),
-        int(module.rope_head_dim),
-        float(module.norm.variance_epsilon),
-    )
+    hidden_nodes = hidden.index_select(0, plan.hidden_ids)
+    if backend == "sgl_kernel_npu":
+        try:
+            from sgl_kernel_npu.tree.compressor_tree import compressor_tree
+            from sgl_kernel_npu.tree.compressor_tree_project import (
+                compressor_tree_project,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "SGLANG_DSPARK_TREE_BACKEND=sgl_kernel_npu requires the "
+                "sgl_kernel_npu tree compressor package"
+            ) from exc
+        compressor_tree_project(
+            hidden_nodes,
+            module._fused_wkv_w,
+            module._fused_wgate_w,
+            nodes,
+            module.ape,
+            residue,
+            plan.query_cu,
+        )
+        node_kv = compressor_tree(
+            state,
+            nodes,
+            module._fused_norm_weight_fp32,
+            cos,
+            sin,
+            table,
+            plan.start,
+            plan.ancestors,
+            plan.depths,
+            plan.req_ids,
+            int(module.ratio),
+            int(module.rope_head_dim),
+            float(module.norm.variance_epsilon),
+        )
+    else:
+        torch.ops._C_ascend.compressor_tree_project(
+            hidden_nodes,
+            module._fused_wkv_w,
+            module._fused_wgate_w,
+            nodes,
+            module.ape,
+            residue,
+            plan.query_cu,
+        )
+        node_kv = torch.ops._C_ascend.compressor_tree(
+            state,
+            nodes,
+            module._fused_norm_weight_fp32,
+            cos,
+            sin,
+            table,
+            plan.start,
+            plan.ancestors,
+            plan.depths,
+            plan.req_ids,
+            int(module.ratio),
+            int(module.rope_head_dim),
+            float(module.norm.variance_epsilon),
+        )
     if record_sink is not None:
         # ratio=1 records the projected state row (one per node); the commit
         # kernel treats ratio=1 as state and writes it back to the state cache.

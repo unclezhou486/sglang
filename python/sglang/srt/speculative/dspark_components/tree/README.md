@@ -64,6 +64,42 @@ and `MarkovScorer` model API; sglang's Markov head exposes
   lazy and `prepare_nodes` / `commit_nodes` raise a clear
   `NotImplementedError`.
 
+## Tree backend switch
+
+`SGLANG_DSPARK_TREE_BACKEND` selects the backend for all four tree operators:
+
+```bash
+# default: vllm-ascend / _C_ascend vendor ops
+SGLANG_DSPARK_TREE_BACKEND=vendor
+
+# all four operators use sgl-kernel-npu Triton
+SGLANG_DSPARK_TREE_BACKEND=sgl_kernel_npu
+
+# vendor output is authoritative; the indexer runs Triton only for comparison
+SGLANG_DSPARK_TREE_BACKEND=shadow
+```
+
+`shadow` is intentionally indexer-only: compressor/attention stay on vendor
+until their correctness and performance are independently gated.  A Triton
+failure or top-k multiset mismatch is logged once and the vendor result is
+returned.  The Triton indexer validates but ignores the vendor metadata
+tensor, so `sgl_kernel_npu` does not need
+`npu_quant_lightning_indexer_v2_metadata`.
+
+The all-Triton mode is opt-in.  The current project/compressor kernels are
+still slower than vendor and attention has no vendor performance comparison;
+do not use it as the serving default.
+
+## Graph capture status
+
+The Triton kernels themselves contain no host synchronization, but the current
+indexer wrapper is **not graph-capture safe**: it reads `lengths.max().item()`
+to choose the slot tile and allocates `keys` / `key_scales` / `valid`
+workspaces on every call.  The surrounding tree planner also performs host
+planning (`plan_tree_pre`, `build_node_plan`).  Use eager mode for the first
+SGLang bring-up; graph capture needs a static slot bound and preallocated
+workspace.
+
 ## Device-only boundaries (never faked)
 
 - Native tree attention: `torch.ops._C_ascend.npu_sparse_attn_sharedkv_tree`.

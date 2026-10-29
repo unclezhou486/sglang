@@ -4,9 +4,22 @@ import os
 
 import torch
 
+from .backend import tree_backend
+
 
 def tree_attn_op_available() -> bool:
-    """True only when the native tree attention op is registered."""
+    """True when the selected tree attention backend is importable."""
+    backend = tree_backend()
+    if backend == "sgl_kernel_npu":
+        try:
+            from sgl_kernel_npu.tree.sparse_attn_sharedkv_tree import (  # noqa: F401
+                sparse_attn_sharedkv_tree,
+            )
+
+            return True
+        except Exception:
+            return False
+
     from .torch_ops import ensure_tree_ops
 
     if not ensure_tree_ops():
@@ -32,6 +45,14 @@ def build_tree_attn_metadata(*, query, metadata, plan, ratio, window, cmp_sparse
     cu_cmp = torch.cat(
         (seq.new_zeros(1), (seq // int(ratio)).cumsum(0, dtype=torch.int32))
     )
+    if tree_backend() == "sgl_kernel_npu":
+        # The Triton attention validates the metadata ABI but ignores the
+        # vendor scheduling fields.  Do not require the vendor metadata op in
+        # the all-Triton path.
+        metadata_tensor = torch.zeros(
+            1024, dtype=torch.int32, device=query.device
+        )
+        return metadata_tensor, cu_ori, cu_cmp
     cmp_topk = (
         int(cmp_sparse_indices.shape[-1])
         if cmp_sparse_indices is not None and int(ratio) == 4
@@ -208,6 +229,19 @@ def tree_attention(**kwargs) -> torch.Tensor:
             "DSpark tree mode requires the Ascend tree attention op "
             "torch.ops._C_ascend.npu_sparse_attn_sharedkv_tree; it is unavailable."
         )
+    if tree_backend() == "sgl_kernel_npu":
+        try:
+            from sgl_kernel_npu.tree.sparse_attn_sharedkv_tree import (
+                sparse_attn_sharedkv_tree,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "SGLANG_DSPARK_TREE_BACKEND=sgl_kernel_npu requires the "
+                "sgl_kernel_npu tree attention package"
+            ) from exc
+        op_kwargs = build_tree_attn_kwargs(**kwargs)
+        q = op_kwargs.pop("q")
+        return sparse_attn_sharedkv_tree(q, **op_kwargs)[0]
     if not tree_attn_op_available():
         raise NotImplementedError(
             "DSpark tree mode requires the Ascend tree attention op "
