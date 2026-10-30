@@ -327,5 +327,40 @@ class NoFallbackTest(CustomTestCase):
                 tree_ops._load_attention_op()
 
 
+class TreeAttentionContractTest(CustomTestCase):
+    def _base_kwargs(self):
+        return dict(
+            q=torch.zeros(9, 1, 8),
+            ori_kv=torch.zeros(4, 1, 8),
+            ori_sparse_indices=torch.zeros(9, 1, 128, dtype=torch.int32),
+            cu_seqlens_q=torch.arange(10, dtype=torch.int32),
+            seqused_kv=torch.full((9,), 3, dtype=torch.int32),
+            tree_ancestors=torch.zeros(9, 2, dtype=torch.long),
+            tree_prefix=torch.zeros(9, dtype=torch.int32),
+            cmp_ratio=1,
+            softmax_scale=0.1,
+        )
+
+    def test_swa_only_drops_tree_fields_without_cmp_tree_kv(self):
+        out = tree_ops.build_tree_attn_kwargs(**self._base_kwargs())
+        self.assertIsNone(out["cmp_tree_kv"])
+        self.assertIsNone(out["tree_ancestors"])
+        self.assertIsNone(out["tree_prefix"])
+
+    def test_cmp_tree_kv_requires_ancestors_and_prefix(self):
+        kwargs = self._base_kwargs()
+        kwargs["cmp_tree_kv"] = torch.zeros(9, 8)
+        kwargs["tree_ancestors"] = None
+        with self.assertRaisesRegex(ValueError, "tree_ancestors"):
+            tree_ops.build_tree_attn_kwargs(**kwargs)
+
+    def test_cmp_tree_kv_keeps_explicit_ancestors_and_prefix(self):
+        kwargs = self._base_kwargs()
+        kwargs["cmp_tree_kv"] = torch.zeros(9, 8)
+        out = tree_ops.build_tree_attn_kwargs(**kwargs)
+        self.assertIsNotNone(out["tree_ancestors"])
+        self.assertIsNotNone(out["tree_prefix"])
+
+
 if __name__ == "__main__":
     unittest.main()
