@@ -1,0 +1,331 @@
+"""Contract tests for the NPU tree-op adapter layer (dspark_tree_ops).
+
+These tests pin the public surface and the invariants the module must preserve,
+on CPU torch only. The four ``sgl_kernel_npu.tree`` operators are never executed
+here: their absence is exactly what the no-fallback tests exercise.
+"""
+
+import sys
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import torch
+
+from sglang.srt.speculative.dspark_components import dspark_tree_ops as tree_ops
+from sglang.test.ci.ci_register import register_cpu_ci
+from sglang.test.test_utils import CustomTestCase
+
+register_cpu_ci(est_time=11, suite="base-a-test-cpu")
+
+REQUIRED_PUBLIC_NAMES = (
+    "NodePlan",
+    "build_node_plan",
+    "get_node_plan",
+    "compress_nodes",
+    "tree_indexer",
+    "quantize_indexer_nodes",
+    "tree_indexer_select_all",
+    "build_tree_attn_kwargs",
+    "build_tree_attn_metadata",
+    "attend_nodes",
+    "record_compressed_nodes",
+    "prepare_nodes",
+    "commit_nodes",
+    "move_swa_kv",
+)
+
+FORBIDDEN_TOKENS = (
+    "_C_ascend",
+    "SGLANG_DSPARK_TREE_BACKEND",
+    "tree.backend",
+    "tree.torch_ops",
+    "os.environ",
+)
+
+
+def _module_source() -> str:
+    return Path(tree_ops.__file__).read_text()
+
+
+def _make_plan(device: str = "cpu") -> tree_ops.NodePlan:
+    """Two requests, query_width=3 each (root + two chain nodes)."""
+    return tree_ops.NodePlan(
+        n=6,
+        max_q=3,
+        start=torch.tensor([5, 5, 5, 8, 8, 8], dtype=torch.int32, device=device),
+        depths=torch.tensor([0, 1, 2, 0, 1, 2], dtype=torch.int64, device=device),
+        # Globalized: rows 0-2 request 0, rows 3-5 request 1 (offset 3).
+        ancestors=torch.tensor(
+            [[0, 0, 0], [0, 1, 0], [0, 1, 2], [3, 3, 3], [3, 4, 3], [3, 4, 5]],
+            dtype=torch.int64,
+            device=device,
+        ),
+        req_ids=torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int64, device=device),
+        query_cu=torch.arange(7, dtype=torch.int32, device=device),
+        hidden_ids=torch.arange(6, dtype=torch.int64, device=device),
+        token_index=torch.arange(6, dtype=torch.int64, device=device),
+    )
+
+
+def _make_pre(device: str = "cpu"):
+    """A TreePrePlan stand-in with the metadata ``build_node_plan`` reads."""
+    prefix = torch.tensor([5, 8], dtype=torch.int32, device=device)
+    depths = torch.tensor([0, 1, 2, 0, 1, 2], dtype=torch.int64, device=device)
+    node_req_ids = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32, device=device)
+    prefix_flat = prefix.repeat_interleave(3)
+    # Local ancestors: root=[0], node1=[0,1], node2=[0,1,2], -1 padded.
+    ancestors = torch.tensor(
+        [[0, -1, -1], [0, 1, -1], [0, 1, 2], [0, -1, -1], [0, 1, -1], [0, 1, 2]],
+        dtype=torch.int64,
+        device=device,
+    )
+    metadata = SimpleNamespace(
+        verify_ids=torch.zeros(6, dtype=torch.int64, device=device),
+        tree_ancestors=ancestors,
+        node_req_ids=node_req_ids,
+        query_width=3,
+        tree_prefix=prefix_flat,
+        positions=prefix_flat + depths,
+        node_cu_seqlens_q=torch.arange(7, dtype=torch.int32, device=device),
+    )
+    return SimpleNamespace(metadata=metadata)
+
+
+class PublicSurfaceTest(CustomTestCase):
+    def test_required_public_names_are_defined(self) -> None:
+        for name in REQUIRED_PUBLIC_NAMES:
+            self.assertTrue(
+                hasattr(tree_ops, name), f"missing public name {name!r}"
+            )
+
+    def test_source_has_no_vendor_backend_fallbacks(self) -> None:
+        """The module is the single NPU boundary: no _C_ascend / env switch."""
+        src = _module_source()
+        for token in FORBIDDEN_TOKENS:
+            self.assertNotIn(token, src, f"forbidden token {token!r} present")
+
+    def test_source_uses_the_four_direct_sgl_kernel_imports(self) -> None:
+        src = _module_source()
+        for op in (
+            "compressor_tree",
+            "compressor_tree_project",
+            "quant_lightning_indexer_tree",
+            "sparse_attn_sharedkv_tree",
+        ):
+            self.assertIn(
+                f"from sgl_kernel_npu.tree import {op}", src, f"missing {op!r}"
+            )
+
+
+class NodePlanTest(CustomTestCase):
+    def test_build_node_plan_globalizes_ancestors_and_pads_with_request_root(self):
+        plan = tree_ops.build_node_plan(_make_pre())
+        self.assertEqual(plan.n, 6)
+        self.assertEqual(plan.max_q, 3)
+        self.assertTrue(torch.equal(plan.start, torch.tensor([5, 5, 5, 8, 8, 8], dtype=torch.int32)))
+        self.assertTrue(torch.equal(plan.depths, torch.tensor([0, 1, 2, 0, 1, 2])))
+        # -1 padding must be replaced by the request root offset, not left -1.
+        expected_ancestors = torch.tensor(
+            [[0, 0, 0], [0, 1, 0], [0, 1, 2], [3, 3, 3], [3, 4, 3], [3, 4, 5]]
+        )
+        self.assertTrue(torch.equal(plan.ancestors, expected_ancestors))
+        self.assertTrue(torch.equal(plan.req_ids, torch.tensor([0, 0, 0, 1, 1, 1])))
+        self.assertEqual(plan.start.dtype, torch.int32)
+        self.assertEqual(plan.query_cu.dtype, torch.int32)
+        self.assertEqual(plan.req_ids.dtype, torch.int64)
+        # node id != KV slot: each node consumes its own hidden row.
+        self.assertTrue(torch.equal(plan.hidden_ids, torch.arange(6)))
+        self.assertTrue(torch.equal(plan.token_index, torch.arange(6)))
+
+    def test_get_node_plan_caches_per_step(self):
+        pre = _make_pre()
+        first = tree_ops.get_node_plan(pre)
+        second = tree_ops.get_node_plan(pre)
+        self.assertIs(first, second)
+
+
+class IndexerTest(CustomTestCase):
+    def test_tree_indexer_select_all_pads_out_of_range_positions(self):
+        plan = _make_plan()
+        out = tree_ops.tree_indexer_select_all(plan, topk=4)
+        self.assertEqual(out.shape, (6, 1, 4))
+        # Req 0: lengths = (start+depth+1)//4 = (5+0+1)//4=1 -> only pos 0 valid.
+        row0 = out[0, 0].tolist()
+        self.assertEqual(row0, [0, -1, -1, -1])
+        # Req 1 root: (8+0+1)//4=2 -> positions 0,1 valid.
+        self.assertEqual(out[3, 0].tolist(), [0, 1, -1, -1])
+
+
+class AttentionKwargsTest(CustomTestCase):
+    def _base(self, **overrides):
+        kw = dict(
+            q=torch.zeros(1, 1, 8),
+            ori_kv=torch.zeros(1, 1, 8),
+            ori_sparse_indices=torch.zeros(1, 1, 128, dtype=torch.int32),
+            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+            seqused_kv=torch.tensor([1], dtype=torch.int32),
+            tree_ancestors=torch.tensor([[0]], dtype=torch.int64),
+            tree_prefix=torch.tensor([0], dtype=torch.int32),
+            cmp_ratio=4,
+            softmax_scale=0.5,
+        )
+        kw.update(overrides)
+        return kw
+
+    def test_missing_required_input_raises(self):
+        kw = self._base()
+        kw["ori_kv"] = None
+        with self.assertRaisesRegex(ValueError, "ori_kv"):
+            tree_ops.build_tree_attn_kwargs(**kw)
+
+    def test_cmp_tree_kv_requires_ancestors_and_prefix(self):
+        kw = self._base(cmp_tree_kv=torch.zeros(1, 8))
+        kw["tree_ancestors"] = None
+        with self.assertRaisesRegex(ValueError, "tree_ancestors"):
+            tree_ops.build_tree_attn_kwargs(**kw)
+
+    def test_all_or_none_tree_fields(self):
+        # No cmp_tree_kv -> tree_ancestors/tree_prefix are forced to None.
+        kw = self._base()
+        out = tree_ops.build_tree_attn_kwargs(**kw)
+        self.assertIsNone(out["tree_ancestors"])
+        self.assertIsNone(out["tree_prefix"])
+        self.assertIsNone(out["cmp_tree_kv"])
+        self.assertEqual(out["ori_mask_mode"], 4)
+        self.assertEqual(out["cmp_mask_mode"], 3)
+        self.assertEqual(out["layout_q"], "TND")
+        self.assertEqual(out["layout_kv"], "PA_ND")
+
+    def test_cmp_tree_kv_present_keeps_tree_fields(self):
+        kw = self._base(cmp_tree_kv=torch.zeros(1, 8))
+        out = tree_ops.build_tree_attn_kwargs(**kw)
+        self.assertIsNotNone(out["cmp_tree_kv"])
+        self.assertIsNotNone(out["tree_ancestors"])
+        self.assertIsNotNone(out["tree_prefix"])
+
+
+class RecordCompressedNodesTest(CustomTestCase):
+    def test_rejects_unsupported_ratio(self):
+        with self.assertRaisesRegex(ValueError, "1/4/128"):
+            tree_ops.record_compressed_nodes(
+                _make_plan(),
+                original=torch.zeros(4, 4, 2),
+                node_data=torch.zeros(6, 2),
+                table=torch.ones(2, 2, dtype=torch.int32),
+                ratio=2,
+            )
+
+    def test_rejects_noncontiguous_node_data(self):
+        node_data = torch.zeros(6, 2, 4)[:, :, 0].t()
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            tree_ops.record_compressed_nodes(
+                _make_plan(),
+                original=torch.zeros(4, 4, 2),
+                node_data=node_data,
+                table=torch.ones(2, 2, dtype=torch.int32),
+                ratio=4,
+            )
+
+    def test_rejects_row_bytes_mismatch(self):
+        with self.assertRaisesRegex(ValueError, "row bytes"):
+            tree_ops.record_compressed_nodes(
+                _make_plan(),
+                original=torch.zeros(4, 4, 2),
+                node_data=torch.zeros(6, 3),
+                table=torch.ones(2, 2, dtype=torch.int32),
+                ratio=4,
+            )
+
+    def test_records_pages_and_ratio(self):
+        record = tree_ops.record_compressed_nodes(
+            _make_plan(),
+            original=torch.zeros(4, 4, 2),
+            node_data=torch.zeros(6, 2),
+            table=torch.ones(2, 2, dtype=torch.int32),
+            ratio=4,
+        )
+        self.assertEqual(record.ratio, 4)
+        self.assertEqual(record.pages, (1,))
+        self.assertIs(record.original.shape[1], 4)
+
+
+class CommitTest(CustomTestCase):
+    def test_plan_tree_commit_token_level_slots(self):
+        plan = tree_ops.plan_tree_commit(
+            path_node_ids=torch.tensor([[1, -1], [1, 2]]),
+            verify_cache_loc=torch.tensor([[10, 11, 12], [20, 21, 22]]),
+            prefix_lens=torch.tensor([5, 8]),
+            block_table=torch.tensor([[0], [0]]),
+            block_size=1,
+        )
+        self.assertTrue(
+            torch.equal(plan.source_rows, torch.tensor([[10, 11, -1], [20, 21, 22]]))
+        )
+        self.assertTrue(
+            torch.equal(plan.dest_positions, torch.tensor([[5, 6, -1], [8, 9, 10]]))
+        )
+        self.assertTrue(
+            torch.equal(plan.dest_slots, torch.tensor([[10, 11, -1], [20, 21, 22]]))
+        )
+        self.assertTrue(torch.equal(plan.commit_lens, torch.tensor([2, 3])))
+        self.assertTrue(torch.equal(plan.new_seq_lens, torch.tensor([7, 11])))
+
+    def test_move_swa_kv_copies_rows(self):
+        buf = torch.arange(24, dtype=torch.float32).reshape(2, 12, 1)
+        pool = SimpleNamespace(
+            layer_num=2,
+            translate_loc_from_full_to_swa=lambda loc: loc,
+            get_swa_buffer=lambda layer_id: buf[layer_id],
+        )
+        plan = tree_ops.TreeCommitPlan(
+            source_rows=torch.tensor([[2], [3]]),
+            dest_positions=torch.tensor([[10], [11]]),
+            dest_slots=torch.tensor([[10], [11]]),
+            commit_lens=torch.tensor([1, 1]),
+            new_seq_lens=torch.tensor([6, 9]),
+        )
+        tree_ops.move_swa_kv(pool, plan)
+        self.assertEqual(float(buf[0, 10, 0]), 2.0)
+        self.assertEqual(float(buf[1, 11, 0]), 15.0)
+
+
+class NoFallbackTest(CustomTestCase):
+    def test_compress_nodes_raises_runtime_error_without_sgl_kernel_npu(self):
+        module = SimpleNamespace(
+            _fused_wkv_w=torch.ones(1),
+            _fused_wgate_w=torch.ones(1),
+            _fused_norm_weight_fp32=torch.ones(1),
+            ratio=4,
+            overlap=0,
+            head_dim=8,
+            ape=torch.ones(4, 8),
+            rope_head_dim=64,
+            norm=SimpleNamespace(variance_epsilon=1e-5),
+        )
+        plan = _make_plan()
+        with mock.patch.dict(sys.modules, {"sgl_kernel_npu": None}):
+            with self.assertRaises(RuntimeError):
+                tree_ops.compress_nodes(
+                    module,
+                    hidden=torch.zeros(6, 8),
+                    state=torch.zeros(4, 4, 16),
+                    table=torch.ones(2, 2, dtype=torch.int32),
+                    cos=torch.ones(16, 64),
+                    sin=torch.ones(16, 64),
+                    plan=plan,
+                )
+
+    def test_op_loaders_raise_runtime_error_not_import_error(self):
+        with mock.patch.dict(sys.modules, {"sgl_kernel_npu": None}):
+            with self.assertRaises(RuntimeError):
+                tree_ops._load_compressor_ops()
+            with self.assertRaises(RuntimeError):
+                tree_ops._load_indexer_op()
+            with self.assertRaises(RuntimeError):
+                tree_ops._load_attention_op()
+
+
+if __name__ == "__main__":
+    unittest.main()
