@@ -152,24 +152,6 @@ def finalize_tree_layout_torch(
     return out
 
 
-def build_chain_layout(tokens: torch.Tensor) -> TreeLayout:
-    """Build the topk=1 chain layout: node i+1's parent is node i."""
-    if tokens.dim() != 2 or tokens.shape[1] < 1:
-        raise ValueError("chain tokens must be [batch, depth] with depth >= 1")
-    batch_size, depth = tokens.shape
-    device = tokens.device
-    depths = torch.arange(1, depth + 1, device=device).expand(batch_size, -1)
-    parents = torch.cat(
-        (
-            torch.zeros((batch_size, 1), dtype=torch.long, device=device),
-            torch.arange(1, depth, device=device)
-            .unsqueeze(0)
-            .expand(batch_size, -1),
-        ),
-        dim=1,
-    )
-    out = _empty_layout(batch_size, depth, device)
-    return finalize_tree_layout_torch(out, tokens, depths, parents, depth)
 
 
 # ---------------------------------------------------------------------------
@@ -669,48 +651,6 @@ def build_tree_metadata(
     )
 
 
-def build_chain_metadata(
-    *,
-    prefix_lens: torch.Tensor,
-    depth: int,
-    anchor_tokens: torch.Tensor,
-) -> TreeMetadata:
-    """Chain geometry (topk=1); verify_ids are only the anchor."""
-    batch = prefix_lens.shape[0]
-    device = prefix_lens.device
-    query_width = depth + 1
-    prefix_2d = prefix_lens.long().unsqueeze(1).expand(batch, query_width)
-    positions = prefix_2d + torch.arange(query_width, device=device)
-    ancestors = torch.full(
-        (batch, query_width, depth + 1), -1, dtype=torch.long, device=device
-    )
-    for node_id in range(query_width):
-        ancestors[:, node_id, : node_id + 1] = torch.arange(
-            node_id + 1, device=device
-        )
-    verify_ids = torch.full(
-        (batch, query_width), -1, dtype=torch.long, device=device
-    )
-    verify_ids[:, 0] = anchor_tokens.long()
-    return TreeMetadata(
-        positions=positions.reshape(-1),
-        node_seqused_kv=(positions + 1).reshape(-1).to(torch.int32),
-        verify_ids=verify_ids.reshape(-1),
-        tree_prefix=prefix_2d.reshape(-1).to(torch.int32),
-        tree_ancestors=ancestors.reshape(batch * query_width, depth + 1),
-        node_req_ids=torch.arange(batch, device=device)
-        .repeat_interleave(query_width)
-        .to(torch.int32),
-        node_cu_seqlens_q=torch.arange(
-            batch * query_width + 1, dtype=torch.int32, device=device
-        ),
-        request_cu_seqlens_q=(
-            torch.arange(batch + 1, dtype=torch.int32, device=device) * query_width
-        ),
-        request_seqused_kv=prefix_lens.to(torch.int32) + query_width,
-        query_width=query_width,
-        num_nodes=depth,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -878,50 +818,8 @@ def plan_tree_commit(
     )
 
 
-def move_swa_kv(pool, plan: TreeCommitPlan) -> None:
-    """Move accepted full/SWA KV rows to contiguous history slots.
-
-    This covers the SWA/ori half for every layer (including compressed layers,
-    whose recent window lives in the same SWA buffer). Compressed KV is
-    committed separately by the node page kernels.
-    """
-    mask = plan.source_rows >= 0
-    if not bool(mask.any()):  # HOST-SYNC: device->host any() to skip empty move
-        return
-    source = plan.source_rows[mask].to(torch.int64)
-    dest = plan.dest_slots[mask].to(torch.int64)
-    src_swa = pool.translate_loc_from_full_to_swa(source)
-    dst_swa = pool.translate_loc_from_full_to_swa(dest)
-    valid = (src_swa >= 0) & (dst_swa >= 0)
-    if not bool(valid.any()):  # HOST-SYNC: device->host any() to skip empty move
-        return
-    src_swa = src_swa[valid]
-    dst_swa = dst_swa[valid]
-    for layer_id in range(int(pool.layer_num)):  # HOST-SYNC: scalar readback
-        buffer = pool.get_swa_buffer(layer_id)
-        flat = buffer.flatten(0, 1)
-        flat[dst_swa] = flat[src_swa]
 
 
-def apply_tree_commit(plan: TreeCommitPlan, *, pool=None, device_hook=None) -> None:
-    """Legacy commit path: explicit device hook or pool-level move_kv_cache.
-
-    The DSV4 worker now commits accepted nodes with ``move_swa_kv`` plus
-    ``prepare_nodes`` / ``commit_nodes``; this function remains for pools that
-    expose ``move_kv_cache`` and for explicit test hooks.
-    """
-    if device_hook is not None:
-        device_hook(plan)
-        return
-    if pool is not None and hasattr(pool, "move_kv_cache"):
-        mask = plan.source_rows >= 0
-        pool.move_kv_cache(plan.dest_slots[mask], plan.source_rows[mask])
-        return
-    raise NotImplementedError(
-        "DSV4 tree commit requires a pool-level move_kv_cache or an explicit "
-        "device hook; this pool has neither. The DSV4 pools do not implement "
-        "move_kv_cache yet."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1107,14 +1005,6 @@ class TreePostPlan:
     commit: TreeCommitPlan
 
 
-@dataclass
-class TreeRoundPlan:
-    layout: TreeLayout
-    metadata: TreeMetadata
-    ori_sparse_indices: torch.Tensor
-    acceptance: TreeAcceptance
-    outputs: TreeAcceptOuts
-    commit: TreeCommitPlan
 
 
 def plan_tree_pre(
@@ -1198,46 +1088,6 @@ def plan_tree_post(
     return TreePostPlan(acceptance=acceptance, outputs=outputs, commit=commit)
 
 
-def plan_tree_round(
-    *,
-    base_logits: torch.Tensor,
-    root_token_ids: torch.Tensor,
-    prefix_lens: torch.Tensor,
-    target_predict: torch.Tensor,
-    block_table: torch.Tensor,
-    block_size: int,
-    window: int,
-    verify_cache_loc: torch.Tensor,
-    config: TreeConfig,
-    scorer=None,
-) -> TreeRoundPlan:
-    """Compose pre and post plans (CPU convenience for tests)."""
-    pre = plan_tree_pre(
-        base_logits=base_logits,
-        root_token_ids=root_token_ids,
-        prefix_lens=prefix_lens,
-        block_table=block_table,
-        block_size=block_size,
-        window=window,
-        config=config,
-        scorer=scorer,
-    )
-    post = plan_tree_post(
-        pre=pre,
-        target_predict=target_predict,
-        verify_cache_loc=verify_cache_loc,
-        prefix_lens=prefix_lens,
-        block_table=block_table,
-        block_size=block_size,
-    )
-    return TreeRoundPlan(
-        layout=pre.layout,
-        metadata=pre.metadata,
-        ori_sparse_indices=pre.ori_sparse_indices,
-        acceptance=post.acceptance,
-        outputs=post.outputs,
-        commit=post.commit,
-    )
 
 
 __all__ = [
@@ -1245,7 +1095,6 @@ __all__ = [
     "TreeShape",
     # layout
     "TreeLayout",
-    "build_chain_layout",
     "finalize_tree_layout_torch",
     # scoring
     "select_candidates",
@@ -1265,14 +1114,11 @@ __all__ = [
     # metadata
     "TreeMetadata",
     "build_tree_metadata",
-    "build_chain_metadata",
     # sparse
     "build_tree_ori_sparse_indices",
     # commit
     "TreeCommitPlan",
     "plan_tree_commit",
-    "move_swa_kv",
-    "apply_tree_commit",
     # config
     "TreeConfig",
     "DSparkWidths",
@@ -1283,8 +1129,6 @@ __all__ = [
     # round
     "TreePrePlan",
     "TreePostPlan",
-    "TreeRoundPlan",
     "plan_tree_pre",
     "plan_tree_post",
-    "plan_tree_round",
 ]

@@ -50,7 +50,6 @@ import torch
 __all__ = [
     "NodePlan",
     "NodeRecord",
-    "TreeCommitPlan",
     "build_node_plan",
     "get_node_plan",
     "compress_nodes",
@@ -63,7 +62,6 @@ __all__ = [
     "record_compressed_nodes",
     "prepare_nodes",
     "commit_nodes",
-    "plan_tree_commit",
     "move_swa_kv",
 ]
 
@@ -808,73 +806,11 @@ def commit_nodes(prepared) -> None:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class TreeCommitPlan:
-    source_rows: torch.Tensor  # [r, max_rows] flat verify rows to move
-    dest_positions: torch.Tensor  # [r, max_rows] logical history positions
-    dest_slots: torch.Tensor  # [r, max_rows] physical cache slots
-    commit_lens: torch.Tensor  # [r]
-    new_seq_lens: torch.Tensor  # [r]
-    state_source: torch.Tensor | None = None
-    state_dest: torch.Tensor | None = None
 
 
-def plan_tree_commit(
-    *,
-    path_node_ids: torch.Tensor,
-    verify_cache_loc: torch.Tensor,
-    prefix_lens: torch.Tensor,
-    block_table: torch.Tensor,
-    block_size: int,
-) -> TreeCommitPlan:
-    """Pure commit plan for tree acceptance.
-
-    Only the root and accepted draft nodes are moved to contiguous history
-    positions. The bonus token is not moved: its KV is produced by the next step.
-    """
-    if path_node_ids.dim() != 2 or verify_cache_loc.dim() != 2:
-        raise ValueError("path_node_ids and verify_cache_loc must be 2-D")
-    batch = path_node_ids.shape[0]
-    if verify_cache_loc.shape[0] != batch:
-        raise ValueError("verify_cache_loc batch mismatch")
-    if prefix_lens.shape[0] != batch or block_table.shape[0] != batch:
-        raise ValueError("prefix_lens/block_table batch mismatch")
-    if block_size < 1:
-        raise ValueError("block_size must be positive")
-    device = path_node_ids.device
-    valid = path_node_ids >= 0
-    num_accepted = valid.sum(dim=1).to(torch.int64)
-    max_rows = int(num_accepted.max().item()) + 1 if batch else 1
-
-    source_rows = torch.full((batch, max_rows), -1, dtype=torch.long, device=device)
-    dest_positions = torch.full((batch, max_rows), -1, dtype=torch.long, device=device)
-    dest_slots = torch.full((batch, max_rows), -1, dtype=torch.long, device=device)
-    for req in range(batch):
-        prefix = int(prefix_lens[req])
-        source_rows[req, 0] = verify_cache_loc[req, 0]
-        dest_positions[req, 0] = prefix
-        # The target verify already wrote the root/path rows into this
-        # window.  Use those columns as destinations instead of re-reading
-        # req_to_token, whose tree-depth columns may still be -1.
-        dest_slots[req, 0] = verify_cache_loc[req, 0]
-        for depth in range(int(num_accepted[req])):
-            node = int(path_node_ids[req, depth])
-            source_rows[req, depth + 1] = verify_cache_loc[req, node]
-            dest_positions[req, depth + 1] = prefix + depth + 1
-            dest_slots[req, depth + 1] = verify_cache_loc[req, depth + 1]
-
-    commit_lens = num_accepted + 1
-    new_seq_lens = prefix_lens.to(torch.int64) + commit_lens
-    return TreeCommitPlan(
-        source_rows=source_rows,
-        dest_positions=dest_positions,
-        dest_slots=dest_slots,
-        commit_lens=commit_lens,
-        new_seq_lens=new_seq_lens,
-    )
 
 
-def move_swa_kv(pool, plan: TreeCommitPlan) -> None:
+def move_swa_kv(pool, plan) -> None:
     """Move accepted full/SWA KV rows to contiguous history slots.
 
     This covers the SWA/ori half for every layer (including compressed layers,

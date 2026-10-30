@@ -273,25 +273,6 @@ class RecordCompressedNodesTest(CustomTestCase):
 
 
 class CommitTest(CustomTestCase):
-    def test_plan_tree_commit_token_level_slots(self):
-        plan = tree_ops.plan_tree_commit(
-            path_node_ids=torch.tensor([[1, -1], [1, 2]]),
-            verify_cache_loc=torch.tensor([[10, 11, 12], [20, 21, 22]]),
-            prefix_lens=torch.tensor([5, 8]),
-            block_table=torch.tensor([[0], [0]]),
-            block_size=1,
-        )
-        self.assertTrue(
-            torch.equal(plan.source_rows, torch.tensor([[10, 11, -1], [20, 21, 22]]))
-        )
-        self.assertTrue(
-            torch.equal(plan.dest_positions, torch.tensor([[5, 6, -1], [8, 9, 10]]))
-        )
-        self.assertTrue(
-            torch.equal(plan.dest_slots, torch.tensor([[10, 11, -1], [20, 21, 22]]))
-        )
-        self.assertTrue(torch.equal(plan.commit_lens, torch.tensor([2, 3])))
-        self.assertTrue(torch.equal(plan.new_seq_lens, torch.tensor([7, 11])))
 
     def test_move_swa_kv_copies_rows(self):
         buf = torch.arange(24, dtype=torch.float32).reshape(2, 12, 1)
@@ -300,7 +281,7 @@ class CommitTest(CustomTestCase):
             translate_loc_from_full_to_swa=lambda loc: loc,
             get_swa_buffer=lambda layer_id: buf[layer_id],
         )
-        plan = tree_ops.TreeCommitPlan(
+        plan = SimpleNamespace(
             source_rows=torch.tensor([[2], [3]]),
             dest_positions=torch.tensor([[10], [11]]),
             dest_slots=torch.tensor([[10], [11]]),
