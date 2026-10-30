@@ -13,11 +13,32 @@ from unittest import mock
 
 import torch
 
-from sglang.srt.speculative.dspark_components import dspark_tree_ops as tree_ops
-from sglang.test.ci.ci_register import register_cpu_ci
-from sglang.test.test_utils import CustomTestCase
+_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(
+    0,
+    str(
+        _ROOT
+        / "python"
+        / "sglang"
+        / "srt"
+        / "speculative"
+        / "dspark_components"
+    ),
+)
 
-register_cpu_ci(est_time=11, suite="base-a-test-cpu")
+try:
+    from sglang.srt.speculative.dspark_components import dspark_tree_ops as tree_ops
+    from sglang.test.ci.ci_register import register_cpu_ci
+    from sglang.test.test_utils import CustomTestCase
+
+    register_cpu_ci(est_time=11, suite="base-a-test-cpu")
+except Exception:
+    import dspark_tree_ops as tree_ops
+
+    def register_cpu_ci(**kwargs):
+        return None
+
+    CustomTestCase = unittest.TestCase
 
 REQUIRED_PUBLIC_NAMES = (
     "NodePlan",
@@ -149,7 +170,7 @@ class NodePlanTest(CustomTestCase):
 class IndexerTest(CustomTestCase):
     def test_tree_indexer_select_all_pads_out_of_range_positions(self):
         plan = _make_plan()
-        out = tree_ops.tree_indexer_select_all(plan, topk=4)
+        out = tree_ops.tree_indexer_select_all(plan, 4, plan.start.device)
         self.assertEqual(out.shape, (6, 1, 4))
         # Req 0: lengths = (start+depth+1)//4 = (5+0+1)//4=1 -> only pos 0 valid.
         row0 = out[0, 0].tolist()
@@ -218,7 +239,7 @@ class RecordCompressedNodesTest(CustomTestCase):
             )
 
     def test_rejects_noncontiguous_node_data(self):
-        node_data = torch.zeros(6, 2, 4)[:, :, 0].t()
+        node_data = torch.zeros(4, 6, 2).permute(1, 0, 2)
         with self.assertRaisesRegex(ValueError, "contiguous"):
             tree_ops.record_compressed_nodes(
                 _make_plan(),
