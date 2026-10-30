@@ -1,8 +1,8 @@
 # DSV4 + DSpark 树形投机解码（topk > 1）Ascend NPU 架构
 
 > **状态：v5.2 已实现，CPU 66/66 通过，A3 硬件关卡待执行。**
-> 分支：`feat/npu-dsv4-dspark-tree-v5`，基线 `main = 5d4a6f499e`，已推送到 `unclezhou`。
-> 规模：17 文件，`+3,832 / −84`；生产约 2,790 行，测试约 1,042 行（66 例）。
+> 分支：`feat/npu-dsv4-dspark-tree-v5`，基线 `main = 5d4a6f499e`，已推送到 `unclezhou`。v5.2 是文档与实现的修订号，分支名保留创建时的 `-v5`。
+> 规模：17 文件 = 2 个新文件 + 12 个生产修改 + 3 个测试文件；`+3,832 / −84`，生产净约 2,790 行，测试约 1,042 行（66 例）。
 > CPU 验证：`python3 -m pytest -q test/registered/unit/spec/test_dspark_tree_core.py test/registered/unit/spec/test_dspark_tree_ops.py test/registered/unit/spec/test_dspark_tree_rope.py`
 
 ---
@@ -34,7 +34,7 @@
 | node-page commit | 把被接受节点的压缩 KV/state 先写入暂存页，再 freeze/commit 到持久化池 |
 | SWA | sliding window attention，最近窗口的原始 KV |
 | indexer | DSV4 的 lightning indexer，对压缩历史做 top-k |
-| V1 / V2 | 两个证伪实验：V1 是 accept 后复算与节点页提交的等价性，V2 是四算子与 CPU oracle 的一致性 |
+| V1 / V2 | 两个证伪实验：V1 是 accept 后复算与节点页提交的等价性，失败不影响当前节点页路径；V2 是四算子与 CPU oracle 的一致性，失败则树不可用 |
 | A3 | Ascend A3 机器，硬件关卡在这里执行 |
 
 ---
@@ -51,7 +51,61 @@
 
 topk=1 完全不经过树：`tree_plan` 默认为 `None`，所有树分支短路，走 `main` 原有的链式路径。
 
-### 2.2 每步数据流
+### 2.2 架构落地：复用、修改、新增
+
+**复用（既有逻辑不改）**
+
+| 组件 | 为什么能复用 |
+|---|---|
+| `DSparkWorkerV2` 调度骨架 | 链式和树共用入口，树只在 verify/commit 分支 |
+| `dspark_draft.py` 的 draft forward 和 markov block（仅 +5 行暴露 `base_logits`） | 树只消费 `base_logits`，不需要第二次 draft forward |
+| `dspark_planner.py` | `VerifyWindow` 已有 `positions_2d` / `verify_cache_loc_2d`；树把宽度设为 `1+budget` |
+| `TargetVerifyExecutor` | 复用 target forward、ragged verify；只加可选 `tree_plan` |
+| `DFlashDraftInputV2` / `DFlashVerifyInput` | 复用 draft/verify 输入；`DFlashVerifyInput` 加一个 `tree_plan` 字段 |
+| `ascend_dsv4_backend` 链式路径 | 树分支全部 `if tree_plan is not None`，链式代码不动 |
+| DP/TP、ragged verify、KV/cache | 基础设施不变 |
+
+**新增（2 个文件）**
+
+| 文件 | 职责 | 边界 |
+|---|---|---|
+| `dspark_tree.py` | 拓扑、ancestor closure、metadata、sparse slots、accept/output、commit plan | 只 import torch 和标准库，不 import 设备 |
+| `dspark_tree_ops.py` | NodePlan、四个树算子、节点页提交、SWA 搬移 | 唯一设备边界，直连 `sgl_kernel_npu`，无 vendor 回退 |
+
+**修改（12 个生产文件 + 3 个测试文件）**
+
+| 文件 | 预期怎么改 | 不影响 |
+|---|---|---|
+| `speculative_hook.py` | 新增 `--speculative-dspark-tree-enable` / `--speculative-dspark-tree-budget`；tree_enable 时 topk 默认 2；调用 `resolve_dspark_widths`；树模式关闭 decode graph；不兼容特性启动报错 | 未开树时 topk 仍强制 1 |
+| `dspark_config.py` | 把 `gamma`（深度）和 `verify_num_draft_tokens`（宽度）解耦；topk=1 仍是 `gamma+1` | 非树 DSpark 行为不变 |
+| `dspark_worker_v2.py` | init 解析树配置；proposal 后 `plan_tree_pre`；把 `tree_plan` 传给 `run_non_compact`；target verify 后 `plan_tree_post`；accept/commit 走树分支；`commit_hidden` 传 `accept_index/tree_positions/tree_commit` | `tree_plan=None` 时走原链式路径 |
+| `dspark_verify.py` | `run_non_compact(..., tree_plan=None)`；树时用 `tree_plan.metadata.positions`；`DFlashVerifyInput(tree_plan=...)`；`commit_hidden` 加树分支 | 链式 commit 不变 |
+| `dflash_info.py` | `DFlashVerifyInput.tree_plan: Optional[object] = None` | 默认 None |
+| `dspark_draft.py` | `DraftProposal` 增加 `base_logits` 字段并在 eager proposal 赋值（+5 行） | 既有 draft 逻辑不改 |
+| `ascend_dsv4_backend.py` | `tree_plan is not None` 时：compressor 走 `compress_nodes`；indexer 走 `tree_indexer`；SWA-only 走 base `sparse_attn_sharedkv`；compressed 层走 `attend_nodes`；节点 KV/scale 挂在 `tree_plan` | 链式 attention 路径不动 |
+| `dsv4_rope.py` | padding 的 `position=-1` clamp 到 0 | 非负位置不变 |
+| `deepseek_v4_memory_pool.py` | c4 ring 按 `verify_width+6` 取 next pow2（最小 16） | 小宽度仍是 16 |
+| `fields/spec.py` | 增加两个 tree 参数 | 无 |
+| `field_order.py` | 注册两个参数 | 无 |
+| `spec_info.py` | draft 宽度取 `speculative_dspark_block_size`，不再从 verify 宽度推导 | topk=1 等于 `num_draft-1` |
+| 3 个测试文件 | 66 个 CPU 用例：core 45、op 20、rope 1 | 不涉及 NPU |
+
+**不改**：`dspark_planner.py`、`dspark_kv_inject.py`、`dspark_deferred_commit.py`、`base_spec_worker.py`。`dspark_draft.py` 仅 +5 行暴露 `base_logits`，既有逻辑不改。
+
+**调用点**
+
+```text
+worker._forward_decode
+  proposal                        # 复用
+  plan_tree_pre                   # 新增：base_logits -> TreePrePlan
+  run_non_compact(tree_plan=...)  # 复用 executor，新增参数
+    DFlashVerifyInput.tree_plan
+    backend tree branches         # compressor / indexer / SWA / compressed
+  plan_tree_post                  # 新增：accept / output / commit plan
+  commit: move_swa_kv + prepare_nodes/commit_nodes + commit_hidden
+```
+
+### 2.3 每步数据流
 
 | 阶段 | 链（topk=1） | 树（topk>1） |
 |---|---|---|
@@ -65,7 +119,7 @@ topk=1 完全不经过树：`tree_plan` 默认为 `None`，所有树分支短路
 
 树模式没有第二次 draft forward。Draft 仍然只产出 `base_logits [bs, depth, vocab]`，树由 markov scorer 在这些 logits 上逐层扩展；节点的 target hidden 来自 target verify，这也正是节点 KV 的来源。
 
-### 2.3 四个算子的管线
+### 2.4 四个算子的管线
 
 ```text
 compressor_tree_project(x, wkv, wgate, nodes, ape, positions, cu)
@@ -97,7 +151,7 @@ sparse_attn_sharedkv_tree(q, ori_kv, cmp_kv, cmp_tree_kv=node_kv,
 - `ori_sparse_indices` 宽度必须是 128 的倍数。
 - SWA-only 层不使用树注意力算子，使用 base `torch.ops.npu.sparse_attn_sharedkv` 加 `metadata_host`。
 
-### 2.4 提交路径
+### 2.5 提交路径
 
 ```text
 verify 阶段：
@@ -150,7 +204,7 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 1. `speculative_eagle_topk` 默认是 1；只有 NPU、DSpark、DSV4、显式开树四个条件同时满足才放开。
 2. `topk=1` 时 `verify_num_draft_tokens == gamma + 1`。
 3. 所有树入口都接受 `tree_plan=None`，所有树分支都是 `if tree_plan is not None`。
-4. 不新增环境变量；`dspark_planner.py` 和 `dspark_draft.py` 不改。
+4. 不新增环境变量；`dspark_planner.py` 不改；`dspark_draft.py` 只新增 `DraftProposal.base_logits` 字段（+5 行），既有逻辑不改。
 5. `DFlashVerifyInput.tree_plan` 默认是 `None`。
 6. 树模式与 deferred commit、compact ragged、watermark、sampling accept graph 互斥，启动即报错。
 7. 树模式关闭 adaptive spec、SPS、STS，不裁剪 verify 宽度。
@@ -259,7 +313,7 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 3. (c) greedy 短上下文：topk=2 token 与 topk=1 一致。
 4. (d) 同一 workload：`accept_len(topk=2)/accept_len(topk=1) > verify_cost(topk=2)/verify_cost(topk=1)`。
 5. (e) 在 TP16/DP16 上重复 (a) 到 (c)。
-6. (f) 图捕获只在 (d) 为负时再做。
+6. (f) 如果 (d) 为负（eager 下 accept 收益覆盖不了 verify 成本），下一步才做图捕获；如果 (d) 为正，不进入图捕获。
 
 V2（四算子对 `tree_reference.py` oracle）必须在 A3 通过后才能签收。
 

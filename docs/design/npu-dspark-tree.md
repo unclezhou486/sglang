@@ -1,8 +1,8 @@
 # DSV4 + DSpark tree speculative decoding (topk > 1) on Ascend NPU
 
 > **Status: v5.2 implemented, CPU 66/66 passing, A3 hardware gates pending.**
-> Branch: `feat/npu-dsv4-dspark-tree-v5`, baseline `main = 5d4a6f499e`, pushed to `unclezhou`.
-> Scale: 17 files, `+3,832 / −84`; production about 2,790 lines, tests about 1,042 lines (66 cases).
+> Branch: `feat/npu-dsv4-dspark-tree-v5`, baseline `main = 5d4a6f499e`, pushed to `unclezhou`. v5.2 is the revision number of the document and the implementation; the branch name keeps the `-v5` from when it was created.
+> Scale: 17 files = 2 new files + 12 production modifications + 3 test files; `+3,832 / −84`, production net about 2,790 lines, tests about 1,042 lines (66 cases).
 > CPU verification: `python3 -m pytest -q test/registered/unit/spec/test_dspark_tree_core.py test/registered/unit/spec/test_dspark_tree_ops.py test/registered/unit/spec/test_dspark_tree_rope.py`
 
 ---
@@ -34,7 +34,7 @@ Deliver a production-grade tree that supports arbitrary `topk` / `depth` / `budg
 | node-page commit | write the compressed KV/state of accepted nodes to a staging page first, then freeze/commit into the persistent pool |
 | SWA | sliding window attention, the original KV of the recent window |
 | indexer | the DSV4 lightning indexer, top-k over compressed history |
-| V1 / V2 | two falsification experiments: V1 is the equivalence of post-accept re-compress and node-page commit, V2 is the agreement of the four operators with the CPU oracle |
+| V1 / V2 | two falsification experiments: V1 is the equivalence of post-accept re-compress and node-page commit, and its failure does not affect the current node-page path; V2 is the agreement of the four operators with the CPU oracle, and its failure makes the tree unusable |
 | A3 | Ascend A3 machine, where the hardware gates run |
 
 ---
@@ -51,7 +51,61 @@ Deliver a production-grade tree that supports arbitrary `topk` / `depth` / `budg
 
 topk=1 never goes through the tree: `tree_plan` defaults to `None`, all tree branches short-circuit, and the original `main` chain path runs.
 
-### 2.2 Per-step dataflow
+### 2.2 Architecture landing: reuse, modify, add
+
+**Reused (existing logic unchanged)**
+
+| component | why it can be reused |
+|---|---|
+| `DSparkWorkerV2` scheduling skeleton | chain and tree share the entry point; the tree only appears in the verify/commit branch |
+| the draft forward and markov block of `dspark_draft.py` (only +5 lines expose `base_logits`) | the tree only consumes `base_logits`; no second draft forward is needed |
+| `dspark_planner.py` | `VerifyWindow` already has `positions_2d` / `verify_cache_loc_2d`; the tree sets the width to `1+budget` |
+| `TargetVerifyExecutor` | reuses target forward and ragged verify; only an optional `tree_plan` is added |
+| `DFlashDraftInputV2` / `DFlashVerifyInput` | reuse the draft/verify inputs; `DFlashVerifyInput` gains one `tree_plan` field |
+| the chain path of `ascend_dsv4_backend` | all tree branches are `if tree_plan is not None`; chain code is untouched |
+| DP/TP, ragged verify, KV/cache | infrastructure unchanged |
+
+**Added (2 files)**
+
+| file | responsibility | boundary |
+|---|---|---|
+| `dspark_tree.py` | topology, ancestor closure, metadata, sparse slots, accept/output, commit plan | imports only torch and the standard library, never the device |
+| `dspark_tree_ops.py` | NodePlan, four tree operators, node-page commit, SWA move | the only device boundary, talks to `sgl_kernel_npu` directly, no vendor fallback |
+
+**Modified (12 production files + 3 test files)**
+
+| file | expected change | does not affect |
+|---|---|---|
+| `speculative_hook.py` | add `--speculative-dspark-tree-enable` / `--speculative-dspark-tree-budget`; topk defaults to 2 when tree_enable; call `resolve_dspark_widths`; turn off the decode graph in tree mode; error at startup on incompatible features | topk is still forced to 1 when the tree is off |
+| `dspark_config.py` | decouple `gamma` (depth) from `verify_num_draft_tokens` (width); topk=1 is still `gamma+1` | non-tree DSpark behavior unchanged |
+| `dspark_worker_v2.py` | init parses the tree config; `plan_tree_pre` after proposal; pass `tree_plan` into `run_non_compact`; `plan_tree_post` after target verify; accept/commit go through the tree branch; `commit_hidden` receives `accept_index/tree_positions/tree_commit` | the original chain path when `tree_plan=None` |
+| `dspark_verify.py` | `run_non_compact(..., tree_plan=None)`; use `tree_plan.metadata.positions` in tree mode; `DFlashVerifyInput(tree_plan=...)`; add a tree branch in `commit_hidden` | chain commit unchanged |
+| `dflash_info.py` | `DFlashVerifyInput.tree_plan: Optional[object] = None` | defaults to None |
+| `dspark_draft.py` | `DraftProposal` gains a `base_logits` field, assigned in eager proposal (+5 lines) | existing draft logic unchanged |
+| `ascend_dsv4_backend.py` | when `tree_plan is not None`: compressor uses `compress_nodes`; indexer uses `tree_indexer`; SWA-only uses base `sparse_attn_sharedkv`; compressed layers use `attend_nodes`; node KV/scale hangs on `tree_plan` | the chain attention path is untouched |
+| `dsv4_rope.py` | clamp padding `position=-1` to 0 | non-negative positions unchanged |
+| `deepseek_v4_memory_pool.py` | the c4 ring takes the next pow2 of `verify_width+6` (minimum 16) | small widths are still 16 |
+| `fields/spec.py` | add two tree arguments | none |
+| `field_order.py` | register the two arguments | none |
+| `spec_info.py` | draft width comes from `speculative_dspark_block_size`, no longer derived from the verify width | topk=1 equals `num_draft-1` |
+| 3 test files | 66 CPU cases: core 45, op 20, rope 1 | no NPU involved |
+
+**Not modified**: `dspark_planner.py`, `dspark_kv_inject.py`, `dspark_deferred_commit.py`, `base_spec_worker.py`. `dspark_draft.py` only gains +5 lines exposing `base_logits`; its existing logic is unchanged.
+
+**Call sites**
+
+```text
+worker._forward_decode
+  proposal                        # reused
+  plan_tree_pre                   # new: base_logits -> TreePrePlan
+  run_non_compact(tree_plan=...)  # reuse executor, new argument
+    DFlashVerifyInput.tree_plan
+    backend tree branches         # compressor / indexer / SWA / compressed
+  plan_tree_post                  # new: accept / output / commit plan
+  commit: move_swa_kv + prepare_nodes/commit_nodes + commit_hidden
+```
+
+### 2.3 Per-step dataflow
 
 | stage | chain (topk=1) | tree (topk>1) |
 |---|---|---|
@@ -65,7 +119,7 @@ topk=1 never goes through the tree: `tree_plan` defaults to `None`, all tree bra
 
 Tree mode has no second draft forward. Draft still produces only `base_logits [bs, depth, vocab]`, and the markov scorer expands the tree level by level over these logits; a node's target hidden comes from target verify, which is also where the node KV comes from.
 
-### 2.3 Four-operator pipeline
+### 2.4 Four-operator pipeline
 
 ```text
 compressor_tree_project(x, wkv, wgate, nodes, ape, positions, cu)
@@ -97,7 +151,7 @@ Contract points:
 - The `ori_sparse_indices` width must be a multiple of 128.
 - SWA-only layers do not use the tree attention operator; they use the base `torch.ops.npu.sparse_attn_sharedkv` with `metadata_host`.
 
-### 2.4 Commit path
+### 2.5 Commit path
 
 ```text
 verify phase:
@@ -150,7 +204,7 @@ Tree attention resolves compressed slots `k >= prefix // ratio` to the node pool
 1. `speculative_eagle_topk` defaults to 1; it is relaxed only when NPU, DSpark, DSV4, and an explicit tree switch all hold.
 2. With `topk=1`, `verify_num_draft_tokens == gamma + 1`.
 3. Every tree entry point accepts `tree_plan=None`, and every tree branch is `if tree_plan is not None`.
-4. No new environment variables; `dspark_planner.py` and `dspark_draft.py` are unchanged.
+4. No new environment variables; `dspark_planner.py` is unchanged; `dspark_draft.py` only adds the `DraftProposal.base_logits` field (+5 lines), with existing logic unchanged.
 5. `DFlashVerifyInput.tree_plan` defaults to `None`.
 6. Tree mode is mutually exclusive with deferred commit, compact ragged, watermark, and the sampling accept graph; it errors at startup.
 7. Tree mode turns off adaptive spec, SPS, and STS, and does not trim the verify width.
@@ -228,7 +282,7 @@ Current known kernel-side graph blockers: the indexer's `lengths.max().item()` a
 - No second DSpark worker, algorithm enum, `SpecInputType`, or `ForwardBatch` field.
 - No vendor `_C_ascend`, shadow, or `SGLANG_DSPARK_TREE_BACKEND`.
 - No rewriting the four operators at the framework layer.
-- No tiling or kernel tuning before (a) to (d) pass on A3.
+- No tiling or kernel work before (a) to (d) pass on A3.
 
 ---
 
@@ -259,7 +313,7 @@ Run in order:
 3. (c) Greedy short context: topk=2 tokens match topk=1.
 4. (d) Same workload: `accept_len(topk=2)/accept_len(topk=1) > verify_cost(topk=2)/verify_cost(topk=1)`.
 5. (e) Repeat (a) to (c) on TP16/DP16.
-6. (f) Do graph capture only if (d) is negative.
+6. (f) If (d) is negative (the accept gain under eager cannot cover the verify cost), do graph capture next; if (d) is positive, do not enter graph capture.
 
 V2 (the four operators against the `tree_reference.py` oracle) must pass on A3 before sign-off.
 
