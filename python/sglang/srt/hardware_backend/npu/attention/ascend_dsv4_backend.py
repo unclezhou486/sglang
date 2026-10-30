@@ -599,11 +599,11 @@ class CompressorAscendBackendMixin:
             getattr(compressor, "is_in_indexer", False)
         ):
             from sglang.srt.speculative.dspark_components.tree.node_pool import (
-                build_node_plan,
+                get_node_plan,
                 compress_nodes,
             )
 
-            plan = build_node_plan(tree_plan)
+            plan = get_node_plan(tree_plan)
             node_kv, _ = compress_nodes(
                 compressor,
                 x,
@@ -628,12 +628,12 @@ class CompressorAscendBackendMixin:
                 quantize_indexer_nodes,
             )
             from sglang.srt.speculative.dspark_components.tree.node_pool import (
-                build_node_plan,
+                get_node_plan,
                 compress_nodes,
                 record_compressed_nodes,
             )
 
-            plan = build_node_plan(tree_plan)
+            plan = get_node_plan(tree_plan)
             records = getattr(tree_plan, "node_records", None)
             node_kv, _ = compress_nodes(
                 compressor,
@@ -1054,7 +1054,7 @@ class C4IndexerAscendBackendMixin:
             tree_indexer_select_all,
         )
         from sglang.srt.speculative.dspark_components.tree.node_pool import (
-            build_node_plan,
+            get_node_plan,
         )
 
         if k.dtype != torch.int8:
@@ -1062,7 +1062,7 @@ class C4IndexerAscendBackendMixin:
                 "DSpark tree indexer supports INT8 A2/A3 indexer K only; "
                 f"got {k.dtype}."
             )
-        plan = build_node_plan(tree_plan)
+        plan = get_node_plan(tree_plan)
         topk = self._dsv4_index_topk
         n = plan.n
         if q_quant.shape[0] < n:
@@ -2670,7 +2670,7 @@ class DeepseekV4AscendAttnBackend(
     ) -> torch.Tensor:
         from sglang.srt.speculative.dspark_components.tree.node_pool import (
             attend_nodes,
-            build_node_plan,
+            get_node_plan,
         )
 
         fm = self.forward_metadata
@@ -2681,7 +2681,7 @@ class DeepseekV4AscendAttnBackend(
                 f"tree compressed layer {layer.layer_id} has no node KV; "
                 "the compressor must run before attention."
             )
-        plan = build_node_plan(tree_plan)
+        plan = get_node_plan(tree_plan)
         n = plan.n
         if q.shape[0] < n:
             raise ValueError(f"tree attention query rows {q.shape[0]} < plan.n {n}")

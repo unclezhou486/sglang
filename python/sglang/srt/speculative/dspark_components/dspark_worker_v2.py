@@ -92,7 +92,7 @@ from sglang.srt.speculative.dspark_components.tree.config import (
     resolve_tree_for_server,
 )
 from sglang.srt.speculative.dspark_components.tree.node_pool import (
-    build_node_plan,
+    get_node_plan,
     commit_nodes,
     prepare_nodes,
 )
@@ -1315,7 +1315,7 @@ class DSparkWorkerV2(BaseSpecWorker):
             move_swa_kv(pool, tree_post.commit)
             records = getattr(tree_pre, "node_records", [])
             if records:
-                plan = build_node_plan(tree_pre)
+                plan = get_node_plan(tree_pre)
                 prepared = prepare_nodes(
                     plan,
                     records,

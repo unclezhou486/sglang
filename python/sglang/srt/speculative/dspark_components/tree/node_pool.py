@@ -68,6 +68,21 @@ def build_node_plan(pre) -> NodePlan:
     )
 
 
+def get_node_plan(pre) -> NodePlan:
+    """Return the per-step node plan, building it at most once.
+
+    vLLM builds the tree plan once per verify step and reuses it for the
+    compressor, indexer and attention.  The Triton path used to rebuild the
+    same tensors several times per layer, adding host work and device
+    synchronization to every decode step.
+    """
+    plan = getattr(pre, "node_plan", None)
+    if plan is None:
+        plan = build_node_plan(pre)
+        pre.node_plan = plan
+    return plan
+
+
 def tree_compressor_ops_available() -> bool:
     from .torch_ops import ensure_tree_ops
 

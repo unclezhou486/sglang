@@ -8,6 +8,7 @@ from tree.node_pool import (
     build_node_descriptors,
     build_node_plan,
     compress_nodes,
+    get_node_plan,
     globalize_winners,
     prepare_nodes,
     record_compressed_nodes,
@@ -28,6 +29,14 @@ def _pre():
         window=4,
         config=cfg,
     )
+
+
+def test_get_node_plan_caches_per_pre_plan():
+    pre = _pre()
+    first = get_node_plan(pre)
+    second = get_node_plan(pre)
+    assert first is second
+    assert pre.node_plan is first
 
 
 def test_node_plan_matches_metadata():
