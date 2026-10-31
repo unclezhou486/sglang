@@ -1,6 +1,6 @@
 # 从零讲清楚：这个分支做了什么
 
-> 主题：DSV4（DeepSeek V4 系列模型）+ DSpark（本仓库的投机解码特性），在 Ascend NPU 上支持 topk>1 的树形投机解码。
+> 主题：DSV4（DeepSeek V4 系列模型）+ DSpark（本仓库的投机解码特性）+ PCTree（Parent-Conditioned Drafting Tree），在 Ascend NPU 上支持 topk>1 的树形投机解码。
 > 读者：没接触过投机解码、DSpark、DSV4 内部结构的人。
 > 目标：读完之后能说清楚「以前是什么、现在多了什么、为什么这么做、代码改在哪、怎么验证」。
 
@@ -20,6 +20,9 @@
 - **prefix**：已经生成并写入 KV cache 的历史。
 - **verify / accept / commit**：验证候选、选出接受路径、把接受路径写回 cache。
 - **ancestor closure**：保留一个节点，就必须保留它从 root 到自己的整条祖先链。
+- **PCTree**：Parent-Conditioned Drafting Tree，父节点条件化建树。同一个深度上，每个 parent 用自己的 Markov bias 算子节点，而不是所有 parent 共用一份子分布。
+- **frontier**：当前层参与扩展的父节点集合。
+- **joint score**：从 root 到某个节点的累计 log 概率。
 
 完整术语表见第 11 节。
 
@@ -29,7 +32,7 @@
 
 **以前**：DSpark 在 `main` 上只有 `topk=1` 的链式投机解码。每一步只猜一条候选链，target 模型一次验证这条链，接受长度有限。
 
-**现在**：这个分支增加了 `topk>1` 的树形验证。draft 每一步可以保留多个候选，形成一棵树；target 一次验证整棵树；accept 时从中选出一条被接受的路径。`topk=1` 仍然走原来的链式路径，行为不变。
+**现在**：这个分支增加了 `topk>1` 的树形验证，具体用的是 **PCTree**（Parent-Conditioned Drafting Tree，父节点条件化建树）的工程化变体。draft 每一步可以保留多个候选，形成一棵树；target 一次验证整棵树；accept 时从中选出一条被接受的路径。`topk=1` 仍然走原来的链式路径，行为不变。
 
 **做了什么**：
 
@@ -89,6 +92,8 @@ prefix -> A -> B -> C -> D
 ```
 
 每层保留多个候选。target 一次验证整棵树，accept 时从 root 往下走，找一条和 target 预测一致的路径。
+
+本分支用的具体树算法叫 **PCTree**（Parent-Conditioned Drafting Tree），关键在「parent-conditioned」：同一个深度上，不同的父节点会得到不同的子节点分布。4.3 会展开。
 
 树的优点是：一条路径没猜中，可能另一条分支猜中，接受长度更高。代价是 verify 的行数变多，target forward 更贵。
 
@@ -224,15 +229,97 @@ draft 模型跑一次 forward，得到每个深度的 `base_logits [bs, depth, v
 
 树模式没有再跑第二次 draft forward。树是在这些 `base_logits` 上长出来的。
 
-### 4.3 plan_tree_pre：把树长出来
+### 4.3 plan_tree_pre：PCTree 把树长出来
 
-1. 第 0 层是 root。
-2. 第 1 层：对 root 用 markov head（draft 模型里的小预测头，用当前 token 给下一个 token 的分数加一个偏置）打分，选 `width` 个候选（本例 `width = topk = 2`）。
-3. 第 2 层：给第 1 层每个节点打分，但每层全局只保留 `width = min(topk, vocab, budget)` 个候选，不是每个节点都留 topk 个孩子。本例 `topk=2`、`budget=4`，所以每层正好 2 个。
-4. 一直扩展到 `depth` 层。
-5. 所有层长完后，再按累计得分做一次全局裁剪，只保留得分最高的 `budget` 个非根节点（这里叫「收敛」，其实就是最终剪枝）。累计得分是沿路径把每步 log 概率相加；不同路径可以互相比较，所以深度大但每步都很强的路径，可能压过深度小但某一步很弱的节点。
-6. 收敛时保证 ancestor closure：保留一个节点，就保留它的整条祖先链。
-7. 给节点重新编号，输出一棵 ancestor-closed 的树。
+这个分支用的树算法叫 **PCTree**（Parent-Conditioned Drafting Tree，父节点条件化建树）。名字里的 parent-conditioned 是关键：同一个深度上，不同的父节点会得到不同的子节点分布，而不是所有父节点共用一份「下一个 token 的概率」。
+
+#### 4.3.1 DSpark 原来怎么走链
+
+DSpark 的 backbone 一次 forward 给出每个深度的 `base_logits`，记作 `L_d`。原来只取一条链：
+
+```text
+z_d = L_d + Markov(y_{d-1})
+y_d = argmax softmax(z_d)
+```
+
+`Markov(y_{d-1})` 是一个小 head，根据「具体的前一个 token」给 logits 加偏置。`topk=1` 时每个深度只保留 argmax，所以是一条链。
+
+#### 4.3.2 PCTree 的关键：每个 parent 单独算 Markov
+
+PCTree 不增加 backbone forward，仍然复用同一份 `L_d`；但它对当前 frontier 里的每个具体父节点 `p` 分别算：
+
+```text
+z_d(p) = L_d + Markov(p)
+logπ_d(·|p) = log_softmax(z_d(p))
+```
+
+也就是说：
+
+- `L_d` 是共享的，backbone 只跑了一次；
+- `Markov(p)` 是每个 parent 自己的，所以叫 parent-conditioned；
+- 子节点的分数是「在这个 parent 条件下」的 log 概率，不是全树共享的 marginal 概率。
+
+为什么这很重要？如果所有 parent 共用一份子分布，那么「单个 token 很常见」不代表「这条路径条件概率高」，可能拼出一条条件上很不可能的路径。PCTree 用 parent 自己的 Markov bias 打分，保证每个分支都是「在这个父节点之后」合理的续写。
+
+一个示意：
+
+| parent | 共享的 `L_d` | 自己的 `Markov(p)` | 该 parent 下的 top-2 孩子 |
+|---|---|---|---|
+| p1 | L | bias1 | A, B |
+| p2 | L | bias2 | C, D |
+
+同一个 `L_d`，两个 parent 的孩子可以完全不同。这就是和「按 marginal logits 建树」的区别。
+
+#### 4.3.3 逐层扩展、候选池、frontier
+
+设：
+
+- `k = topk`：每个 parent 的局部分支数；
+- `B = depth`：block size，也是最大层数；
+- `N`：verify 节点预算，**包含 root**；代码里 `N = 1 + budget`；
+- `F_{d-1}`：第 d 层使用的 parent frontier，`F_{-1} = {root}`。
+
+每一层 d：
+
+1. 把 frontier 里的所有 parent 批量送进同一个 Markov head；
+2. 每个 parent 取 local top-`width` 个子节点（正常 `width = k`），加入候选池；
+3. 子节点累计分数：`s(child) = s(parent) + logπ_d(child | parent)`；
+4. 在本层候选里按累计分数保留 top-`width`，作为下一层的 frontier。
+
+注意：不是每个 parent 都保留 top-k 个孩子。每个 parent 先产生 top-k 个候选，但一层结束时只留全局 top-`width` 个节点。所以 frontier 的宽度始终 ≤ k，不会指数爆炸。
+
+论文把本层所有 local children 放进候选池，等最后再做 global top-N；本实现为了省内存，在每层就只把 top-`width` 写进 `state`。所以 4.3.4 说的「已选节点」是这些被写下来的节点，差异见 4.3.6。
+
+#### 4.3.4 全局预算与 ancestor closure
+
+跑完 B 层后，对所有已选节点按累计分数排序；root 分数为 0，永远保留；非根节点保留 top-`budget` 个。
+
+因为 `s(child) = s(parent) + logπ ≤ s(parent)`，父节点的分数永远不低于子节点，所以保留集天然是 ancestor-closed（前缀闭包）：保留一个节点，它的祖先一定也在里面。分数相同时，论文的规则是「浅层优先，再按稳定节点 id」；代码用稳定排序，节点 id 按深度优先编号，效果基本一致。
+
+#### 4.3.5 和代码的对应
+
+| PCTree 里的概念 | 代码里 |
+|---|---|
+| `k` | `topk` |
+| `N`（含 root） | `1 + budget` |
+| `B` | `depth` / `gamma` |
+| `L_d` | `base_logits[:, d]` |
+| `Markov(p)` | `head.step_bias(frontier_tokens, hidden_states=None, state=None)` |
+| `logπ_d(·\|p)` | `select_candidates` 的 log_softmax + topk |
+| `s(c)` | `path_scores` |
+| frontier | `TreeBuilder.build` 里的 `frontier` |
+| 候选池 | `state.tokens` / `state.path_scores`，只存每层 top-`width` |
+| 全局 top-N | `keep_count = min(budget, num_nodes)` 的最终裁剪 |
+
+代码里的 `width = min(topk, vocab, budget)` 是安全上限：正常情况下 `width = topk`；当 vocab 很小或 budget 小于 topk 时，宽度会被压小。
+
+#### 4.3.6 本分支的实现和论文 Algorithm 1 有一个差异
+
+论文的 Algorithm 1 会把**每个 parent 的 local top-k 子节点都放进候选池**，最后在完整候选池上做 global top-N。本分支沿用 vllm-ascend 的 level-wise builder：每层只把全局 top-`width` 个节点写进 `state`，最后在 `width × depth` 个已选节点里做 top-`budget`。
+
+两者都保证 ancestor closure，也都用 parent-conditioned Markov 打分，但不是逐节点等价：如果以后要严格复现论文的候选池，需要把每层所有 local children 都保留下来，并把候选池规模从 `width × depth` 放宽到论文的 `k + (B-1)k²` 量级。当前实现是已经上机验证过的 vllm-ascend 版本，所以分支先用它。
+
+`topk=1` 时，每层只有一个孩子，PCTree 退化成 DSpark 原来的链（最多到全局 budget）。
 
 为什么要 ancestor closure？如果保留了一个节点，但它的父节点被丢掉，这个节点就没有从 root 到它的路径，target 无法验证它，accept 也走不到它。
 
@@ -550,6 +637,10 @@ V2 是四个算子和 `tree_reference.py` CPU oracle 的一致性。它必须在
 | depth | 树深，等于 draft horizon |
 | budget | 非根节点数，verify 行数是 1+budget |
 | ancestor closure | 保留节点必须保留整条祖先链 |
+| PCTree | Parent-Conditioned Drafting Tree，父节点条件化建树 |
+| parent-conditioned | 每个父节点用自己的 Markov bias 算子节点，不共用一份子分布 |
+| frontier | 当前层参与扩展的父节点集合 |
+| joint score | 从 root 到某节点的累计 log 概率 |
 | SWA | 最近窗口的原始 KV |
 | 压缩 KV | 按 ratio 4/128 压缩后的历史 KV |
 | indexer | 从压缩历史里挑 top-k 的模块 |
@@ -564,6 +655,12 @@ V2 是四个算子和 `tree_reference.py` CPU oracle 的一致性。它必须在
 
 **Q: topk=2 一定比 topk=1 快吗？**
 不一定。树多了候选，accept length 可能更高，但 verify 行数也更多。必须用 (d) 比较两个比值。
+
+**Q: PCTree 是什么？**
+PCTree 是 Parent-Conditioned Drafting Tree。它不是按全树共享的 marginal 概率取 token，而是让每个 parent 单独过 Markov head：`z_d(p) = L_d + Markov(p)`，再按累计 log 概率逐层保留 top-width、最后全局 top-budget。详见 4.3。
+
+**Q: 本分支的 PCTree 和论文完全一样吗？**
+不完全。论文 Algorithm 1 保留每层所有 local top-k 子节点到候选池，再做 global top-N；本分支沿用 vllm-ascend 的 level-wise builder，每层只写 top-width，最后在已选节点里裁剪。两者都保持 ancestor closure，但不是逐节点等价。详见 4.3.6。
 
 **Q: 为什么不用 EAGLE 的树？**
 EAGLE 是均匀 topk 叉、没有 ancestor closure，accept kernel 只支持链式；复用它产出的树和 DSpark 需要的不一样。
@@ -586,5 +683,6 @@ EAGLE 是均匀 topk 叉、没有 ancestor closure，accept kernel 只支持链�
 
 - 架构文档（中文）：`docs/design/npu-dspark-tree.zh.md`
 - 架构文档（英文）：`docs/design/npu-dspark-tree.md`
+- PCTree 论文：From Chains to Trees: Parent-Conditioned Drafting for Semi-Autoregressive Speculative Decoding，arXiv:2608.02123，https://arxiv.org/abs/2608.02123
 - 实现分支：`feat/npu-dsv4-dspark-tree-v5`
 - 参考分支：`feat/npu-dsv4-dspark-topk`（用户已在 TP16 + DP16 上机验证）

@@ -76,7 +76,7 @@ topk=1 完全不经过树：`tree_plan` 默认为 `None`，所有树分支短路
 
 | 文件 | 预期怎么改 | 不影响 |
 |---|---|---|
-| `speculative_hook.py` | 新增 `--speculative-dspark-tree-enable` / `--speculative-dspark-tree-budget`；tree_enable 时 topk 默认 2；调用 `resolve_dspark_widths`；树模式关闭 decode graph；不兼容特性启动报错 | 未开树时 topk 仍强制 1 |
+| `speculative_hook.py` | 新增 `--speculative-dspark-tree-enable` / `--speculative-dspark-tree-budget`；tree_enable 时 topk 默认 2；调用 `resolve_dspark_widths`；树模式关闭 decode graph；不兼容特性尽早报错（compact ragged 启动，grammar/watermark 运行时报） | 未开树时 topk 仍强制 1 |
 | `dspark_config.py` | 把 `gamma`（深度）和 `verify_num_draft_tokens`（宽度）解耦；topk=1 仍是 `gamma+1` | 非树 DSpark 行为不变 |
 | `dspark_worker_v2.py` | init 解析树配置；proposal 后 `plan_tree_pre`；把 `tree_plan` 传给 `run_non_compact`；target verify 后 `plan_tree_post`；accept/commit 走树分支；`commit_hidden` 传 `accept_index/tree_positions/tree_commit` | `tree_plan=None` 时走原链式路径 |
 | `dspark_verify.py` | `run_non_compact(..., tree_plan=None)`；树时用 `tree_plan.metadata.positions`；`DFlashVerifyInput(tree_plan=...)`；`commit_hidden` 加树分支 | 链式 commit 不变 |
@@ -104,6 +104,17 @@ worker._forward_decode
   plan_tree_post                  # 新增：accept / output / commit plan
   commit: move_swa_kv + prepare_nodes/commit_nodes + commit_hidden
 ```
+
+### 2.2.1 PCTree 建树（本分支实际用的算法）
+
+树不是按 marginal base logits 直接取 topk，而是 **PCTree**（Parent-Conditioned Drafting Tree）的 level-wise 变体：
+
+- 每个深度共享 backbone 的 `base_logits[:, d]`；对 frontier 里每个具体 parent `p` 单独调用 `markov_head.step_bias(p)`，得到 `L_d + Markov(p)`。
+- 每个 parent 取 local top-`width` 子节点，按累计 joint score 逐层保留 top-`width` frontier。
+- 跑完 `depth` 层后，在已选节点里保留 top-`budget` 个非根节点；因为子节点分数不高于父节点，保留集天然 ancestor-closed。
+- `topk=1` 退化为原链。
+
+与论文 Algorithm 1 的差异：论文保留每层所有 local top-k 子节点到候选池，再做 global top-N；本分支沿用 vllm-ascend 的 level-wise builder，每层只写 top-`width`，最后在 `width × depth` 个已选节点里裁剪。两者都保持 ancestor closure，但不是逐节点等价。详见从零讲解 §4.3。
 
 ### 2.3 每步数据流
 
@@ -201,7 +212,7 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 
 ### 4.1 topk=1 完全一致
 
-1. `speculative_eagle_topk` 默认是 1；只有 NPU、DSpark、DSV4、显式开树四个条件同时满足才放开。
+1. `speculative_eagle_topk` 默认是 1；代码显式门禁是 DSpark 路径 + 显式开树开关，NPU/DSV4 是隐式前提（树分支只存在于 `ascend_dsv4_backend`）。
 2. `topk=1` 时 `verify_num_draft_tokens == gamma + 1`。
 3. 所有树入口都接受 `tree_plan=None`，所有树分支都是 `if tree_plan is not None`。
 4. 不新增环境变量；`dspark_planner.py` 不改；`dspark_draft.py` 只新增 `DraftProposal.base_logits` 字段（+5 行），既有逻辑不改。

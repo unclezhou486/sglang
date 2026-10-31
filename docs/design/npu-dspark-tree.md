@@ -76,7 +76,7 @@ topk=1 never goes through the tree: `tree_plan` defaults to `None`, all tree bra
 
 | file | expected change | does not affect |
 |---|---|---|
-| `speculative_hook.py` | add `--speculative-dspark-tree-enable` / `--speculative-dspark-tree-budget`; topk defaults to 2 when tree_enable; call `resolve_dspark_widths`; turn off the decode graph in tree mode; error at startup on incompatible features | topk is still forced to 1 when the tree is off |
+| `speculative_hook.py` | add `--speculative-dspark-tree-enable` / `--speculative-dspark-tree-budget`; topk defaults to 2 when tree_enable; call `resolve_dspark_widths`; turn off the decode graph in tree mode; fail early on incompatible features (compact ragged at startup, grammar/watermark at runtime) | topk is still forced to 1 when the tree is off |
 | `dspark_config.py` | decouple `gamma` (depth) from `verify_num_draft_tokens` (width); topk=1 is still `gamma+1` | non-tree DSpark behavior unchanged |
 | `dspark_worker_v2.py` | init parses the tree config; `plan_tree_pre` after proposal; pass `tree_plan` into `run_non_compact`; `plan_tree_post` after target verify; accept/commit go through the tree branch; `commit_hidden` receives `accept_index/tree_positions/tree_commit` | the original chain path when `tree_plan=None` |
 | `dspark_verify.py` | `run_non_compact(..., tree_plan=None)`; use `tree_plan.metadata.positions` in tree mode; `DFlashVerifyInput(tree_plan=...)`; add a tree branch in `commit_hidden` | chain commit unchanged |
@@ -104,6 +104,17 @@ worker._forward_decode
   plan_tree_post                  # new: accept / output / commit plan
   commit: move_swa_kv + prepare_nodes/commit_nodes + commit_hidden
 ```
+
+### 2.2.1 PCTree construction (the algorithm this branch actually uses)
+
+The tree is not built by taking top-k over marginal base logits. It uses a level-wise variant of **PCTree** (Parent-Conditioned Drafting Tree):
+
+- Each depth reuses the shared backbone logits `base_logits[:, d]`; for every concrete parent `p` in the frontier, it calls `markov_head.step_bias(p)` separately, producing `L_d + Markov(p)`.
+- Each parent proposes local top-`width` children; the next frontier keeps the global top-`width` nodes by cumulative joint score.
+- After `depth` levels, keep the top-`budget` non-root nodes among the stored nodes. Because a child's score never exceeds its parent's, the kept set is ancestor-closed.
+- `topk=1` collapses to the original chain.
+
+Difference from the paper's Algorithm 1: the paper keeps all local top-k children in a candidate pool, then takes global top-N; this branch follows vllm-ascend's level-wise builder, stores only top-`width` per level, and trims the `width × depth` stored nodes to `budget`. Both preserve ancestor closure, but they are not node-for-node equivalent. See the from-scratch walkthrough §4.3.
 
 ### 2.3 Per-step dataflow
 
@@ -201,7 +212,7 @@ Tree attention resolves compressed slots `k >= prefix // ratio` to the node pool
 
 ### 4.1 topk=1 fully identical
 
-1. `speculative_eagle_topk` defaults to 1; it is relaxed only when NPU, DSpark, DSV4, and an explicit tree switch all hold.
+1. `speculative_eagle_topk` defaults to 1. The explicit code gate is the DSpark path plus the tree switch; NPU and DSV4 are implicit prerequisites (tree branches exist only in `ascend_dsv4_backend`), not startup checks.
 2. With `topk=1`, `verify_num_draft_tokens == gamma + 1`.
 3. Every tree entry point accepts `tree_plan=None`, and every tree branch is `if tree_plan is not None`.
 4. No new environment variables; `dspark_planner.py` is unchanged; `dspark_draft.py` only adds the `DraftProposal.base_logits` field (+5 lines), with existing logic unchanged.
@@ -219,7 +230,7 @@ Tree attention resolves compressed slots `k >= prefix // ratio` to the node pool
 - Requesting the tree path with `topk < 2` raises.
 - An `ori_sparse_indices` width that is not a multiple of 128, or a `ratio` outside `{4,128}`, raises.
 - Unused nodes must be fully invalidated: `token=-1`, `depth=0`, `parent=-1`, `first_child=-1`, `next_sibling=-1`, `visibility=false`, `position=-1`, `cache_loc=-1`.
-- Enabling tree mode together with an incompatible feature errors at startup.
+- Enabling tree mode together with an incompatible feature fails early (compact ragged at startup, grammar/watermark at runtime).
 - A mixed prefill+decode batch inside the tree gear runs eager or errors.
 - Creating tensors inside the capture region is not allowed; buffers are preallocated in `__init__`.
 
