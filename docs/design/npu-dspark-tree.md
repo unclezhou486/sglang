@@ -2,7 +2,7 @@
 
 > **Status: v5.2 implemented, CPU 66/66 passing, A3 hardware gates pending.**
 > Branch: `feat/npu-dsv4-dspark-tree-v5`, baseline `main = 5d4a6f499e`, pushed to `unclezhou`. v5.2 is the revision number of the document and the implementation; the branch name keeps the `-v5` from when it was created.
-> Scale: 17 files = 2 new files + 12 production modifications + 3 test files; `+3,832 / −84`, production net about 2,790 lines, tests about 1,042 lines (66 cases).
+> Scale: 17 files = 2 new files + 12 production modifications + 3 test files; `+3,832 / −84`, production insertions about 2,790 lines (net +2,706), tests about 1,042 lines (66 cases).
 > CPU verification: `python3 -m pytest -q test/registered/unit/spec/test_dspark_tree_core.py test/registered/unit/spec/test_dspark_tree_ops.py test/registered/unit/spec/test_dspark_tree_rope.py`
 
 ---
@@ -357,3 +357,7 @@ V2 (the four operators against the `tree_reference.py` oracle) must pass on A3 b
 - Scheme B falsified: `build_tree_kernel.cpp:151,181` (parent = selected_index // topk), `:163-165` (orphans hit a bare continue), `verify_tree_greedy.py:51` (chain-only accept), reference `tree/builder.py:47-49,99-129` (ancestor-closed).
 - Skipping compressed KV falsified: `tree_ops_semantics.md`, `tree_reference.py:539-557`, and the boundary partial block at `prefix % ratio != 0`.
 - DP/TP: `runtime_context.derive_attn_tp_size:73-76`, `fields/parallel.py:203-205`.
+
+## Further reading
+
+- From-scratch walkthrough (Chinese): [npu-dspark-tree-explained.zh.md](npu-dspark-tree-explained.zh.md)

@@ -2,7 +2,7 @@
 
 > **状态：v5.2 已实现，CPU 66/66 通过，A3 硬件关卡待执行。**
 > 分支：`feat/npu-dsv4-dspark-tree-v5`，基线 `main = 5d4a6f499e`，已推送到 `unclezhou`。v5.2 是文档与实现的修订号，分支名保留创建时的 `-v5`。
-> 规模：17 文件 = 2 个新文件 + 12 个生产修改 + 3 个测试文件；`+3,832 / −84`，生产净约 2,790 行，测试约 1,042 行（66 例）。
+> 规模：17 文件 = 2 个新文件 + 12 个生产修改 + 3 个测试文件；`+3,832 / −84`，生产约 2,790 行（净增 2,706），测试约 1,042 行（66 例）。
 > CPU 验证：`python3 -m pytest -q test/registered/unit/spec/test_dspark_tree_core.py test/registered/unit/spec/test_dspark_tree_ops.py test/registered/unit/spec/test_dspark_tree_rope.py`
 
 ---
@@ -357,3 +357,7 @@ V2（四算子对 `tree_reference.py` oracle）必须在 A3 通过后才能签�
 - 方案 B 被证伪：`build_tree_kernel.cpp:151,181`（parent = selected_index // topk）、`:163-165`（orphan 直接 continue）、`verify_tree_greedy.py:51`（chain-only accept）、参考 `tree/builder.py:47-49,99-129`（ancestor-closed）。
 - 跳过压缩 KV 被证伪：`tree_ops_semantics.md`、`tree_reference.py:539-557`，以及 `prefix % ratio != 0` 的边界残块。
 - DP/TP：`runtime_context.derive_attn_tp_size:73-76`、`fields/parallel.py:203-205`。
+
+## 延伸阅读
+
+- 从零讲解（适合第一次接触投机解码 / DSV4 的读者）：[npu-dspark-tree-explained.zh.md](npu-dspark-tree-explained.zh.md)
