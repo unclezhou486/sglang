@@ -10,7 +10,7 @@
 >
 > 代码片段是节选，省略了参数、日志和断言；完整 diff 见 `git diff main...HEAD`。
 
-**阅读路径**：第 1 节总览 → 第 3 节配置层 → 第 4 节接线层 → 第 5 节后端层 → 第 6 节修复层 → 第 7 节 topk=1 影响矩阵。
+**阅读路径**：第 1 节总览 → 第 3 节配置层 → 第 4 节接线层 → 第 5 节后端层 → 第 6 节修复/适配层 → 第 7 节 topk=1 影响矩阵。
 
 ---
 
@@ -22,7 +22,7 @@
 配置层    fields/spec.py, field_order.py, speculative_hook.py, dspark_config.py
 接线层    dspark_draft.py, dflash_info.py, dspark_verify.py, dspark_worker_v2.py
 后端层    ascend_dsv4_backend.py
-修复层    dsv4_rope.py, deepseek_v4_memory_pool.py, spec_info.py
+修复/适配层 dsv4_rope.py, deepseek_v4_memory_pool.py, spec_info.py
 ```
 
 核心思路：
@@ -31,7 +31,7 @@
 - 把 `gamma` 和 `verify_width` 解耦；
 - 让 draft 暴露 `base_logits`；
 - 把 `tree_plan` 从 worker 传到 verify/backend；
-- 在 backend 里加四条树路由；
+- 在 backend 里加四条树路由 + 两个 helper；
 - 修两个树路径暴露出来的边界问题：负 position、c4 ring 宽度；
 - 所有树分支都以 `tree_plan is not None` 或 `topk > 1` 为门，topk=1 走原路径。
 
@@ -41,7 +41,7 @@
 
 | # | 文件 | 精确 +/− | 角色 |
 |---|---|---:|---|
-| 1 | `python/sglang/srt/hardware_backend/npu/attention/ascend_dsv4_backend.py` | +478 / −11 | 四条树路由、算子接线、absolute page table |
+| 1 | `python/sglang/srt/hardware_backend/npu/attention/ascend_dsv4_backend.py` | +478 / −11 | 四条树路由 + 两个 helper、算子接线、absolute page table |
 | 2 | `python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py` | +132 / −2 | worker 生命周期接线：plan pre/post、accept/commit |
 | 3 | `python/sglang/srt/speculative/dspark_components/dspark_verify.py` | +66 / −12 | verify 接收 tree_plan、tree commit_hidden |
 | 4 | `python/sglang/srt/arg_groups/speculative_hook.py` | +55 / −39 | CLI、宽度解析、关图、门禁 |
@@ -57,7 +57,7 @@
 合计：**+821 / −84**。  
 再加上 2 个新文件（`dspark_tree.py` 1,134 + `dspark_tree_ops.py` 835），才是生产新增 2,790 行（净增 2,706）。
 
-下面按“配置层 → 接线层 → 后端层 → 修复层”讲，和上面的文件编号顺序不同。
+下面按“配置层 → 接线层 → 后端层 → 修复/适配层”讲，和上面的文件编号顺序不同。
 
 ---
 
@@ -158,7 +158,7 @@ speculative_dspark_tree_budget: A[
 **改了什么**
 
 1. `tree_enable` 时，`speculative_eagle_topk` 默认 2；
-2. 不再手写 `gamma + 1`，改调 `resolve_dspark_widths`；
+2. 不再手写 `gamma + 1`，读取 ragged mode 后改调 `resolve_dspark_widths`；
 3. 自动声明 `speculative_num_draft_tokens = widths.verify_width`；
 4. 树 `topk > 1` 时关闭 decode CUDA graph；
 5. 清掉用户显式设置的 `cuda_graph_bs_decode/prefill`；
@@ -313,7 +313,9 @@ tree_plan: Optional[object] = None
 2. 树模式用 `tree_plan.metadata.positions` 覆盖原 positions；
 3. `DFlashVerifyInput(tree_plan=tree_plan)`；
 4. `commit_hidden` 增加 `accept_index` / `tree_positions` / `tree_commit`；
-5. tree commit 时按 `accept_index` 重排 hidden，用 `tree_commit.dest_positions/dest_slots` 提交。
+5. tree commit 时按 `accept_index` 重排 hidden，用 `tree_commit.dest_positions/dest_slots` 提交；
+6. `accept_index` 路径用 `gather_accepted_rows` 把 positions/cache_loc 按接受路径收拢；
+7. SWA ring 下，tree commit 用 `req_pool_indices` 和 `max_rows` 重建 `state_slot`。
 
 **关键片段**
 
@@ -359,15 +361,18 @@ if tree_commit is not None:
 
 **改了什么**
 
-1. init 解析 `resolve_tree_for_server`；
-2. 校验 `verify_num_draft_tokens == tree.verify_width`；
-3. 校验 `sliding_window > 0`；
-4. proposal 后调 `plan_tree_pre`；
-5. 把 `tree_plan` 传给 `run_non_compact`；
-6. verify 后调 `plan_tree_post`；
-7. tree accept / commit 分支；
-8. `commit_hidden` 传 `accept_index/tree_positions/tree_commit`；
-9. 树分支拒绝 folded proposal / grammar / watermark。
+1. init 把 `gamma` / `verify_num_draft_tokens` 传给 `resolve_runtime_config`；
+2. init 解析 `resolve_tree_for_server`（要求 static ragged）；
+3. 校验 `verify_num_draft_tokens == tree.verify_width`；
+4. 校验 `sliding_window > 0`（从 `hf_config.sliding_window` / `window_size` 取）；
+5. proposal 后调 `plan_tree_pre`，传 `page_table` / `full_to_swa_mapping` / `draft_slots`；
+6. 把 `tree_plan` 传给 `run_non_compact`；
+7. verify 后调 `plan_tree_post`；
+8. tree accept / commit 分支；
+9. `commit_hidden` 传 `accept_index/tree_positions/tree_commit`；
+10. 树分支拒绝 folded proposal / grammar / watermark；
+11. tree accept 后 ngram update 用 `accept.out_tokens`，而不是 `verify_ids_2d`；
+12. tree accept 的 `cap_trim_lens` 置零，不做 cap trim。
 
 **关键片段**
 
@@ -391,7 +396,7 @@ if self._tree_config is not None and self._tree_config.topk > 1:
         block_size=1,
         window=self._tree_sliding_window,
         config=self._tree_config,
-        scorer=DSparkMarkovScorer(self.draft_model.markov_head, topk),
+        scorer=DSparkMarkovScorer(self.draft_model.markov_head, self._tree_config.topk),
         ...
     )
     verify_ids_2d = tree_pre.metadata.verify_ids.reshape(bs, -1)
@@ -404,6 +409,7 @@ if tree_post is not None:
     accept = AcceptOuts(
         correct_len=tree_post.outputs.num_accepted,
         bonus=tree_post.acceptance.bonus,
+        cap_trim_lens=torch.zeros_like(tree_post.outputs.num_accepted),
         commit_lens=tree_post.commit.commit_lens,
         new_seq_lens=tree_post.commit.new_seq_lens,
         out_tokens=tree_post.outputs.out_tokens,
@@ -440,9 +446,19 @@ worker 是唯一知道“proposal 完成、target verify 完成、该 commit”�
 |---|---|
 | `_tree_swa_ops` | 选支持 `ori_sparse_indices` 的 base `sparse_attn_sharedkv` |
 | `_build_full_state_page_table` | 给 tree compressor/commit 构造绝对 state page table |
+| compressor 树分支 | 逐节点压缩、记录 NodeRecord、写 `tree_node_kv` |
 | `_forward_tree_indexer` | 逐节点 c4 top-k，支持 select-all 快捷路径 |
 | `_forward_tree_swa` | SWA-only 层：base 算子 + 树 slot |
 | `_forward_tree_attention` | 压缩层：`attend_nodes` + node KV |
+
+另外还有几处容易漏掉的接线：
+
+- `_op_supports_kwarg`：用 op schema 反射判断 `ori_sparse_indices` / `ori_topk` 是否被当前 `sgl-kernel-npu` 支持，避免不同 kernel 版本签名不同；
+- tree verify 的 `ori_win_left` 扩到 `window + query_width - 2`：让 root 刚写入的 KV 落在 SAS workspace 窗口内；
+- `_compute_kernel_metadata` 在 tree 下传 `ori_topk = ori_sparse_indices.shape[-1]`，链式传 0；
+- tree compressor 用 `rope.ensure_tables`（按绝对 `start+depth` 索引），非 tree 用 `get_cos_sin`；
+- compressor 树分支：非 arch35 用 `_build_full_state_page_table` 重建绝对 state table（滑窗表列 0 是 `start_pos-history`，tree kernel 按绝对 position 索引会错位）；`compress_nodes` 后把 `node_kv` 挂到 `tree_plan.tree_node_kv[layer_id]`；indexer compressor 额外 `quantize_indexer_nodes`，并记录 `NodeRecord`；
+- indexer 树分支：短历史走 `tree_indexer_select_all`，否则走 `tree_indexer`。
 
 **关键片段**
 
@@ -450,14 +466,21 @@ worker 是唯一知道“proposal 完成、target verify 完成、该 commit”�
 def _tree_swa_ops():
     sgl_attn = getattr(torch.ops.npu, "sparse_attn_sharedkv", None)
     sgl_meta = getattr(torch.ops.npu, "sparse_attn_sharedkv_metadata_host", None)
-    if sgl_attn is not None and _op_supports_kwarg(sgl_attn, "ori_sparse_indices"):
+    if (
+        sgl_attn is not None
+        and sgl_meta is not None
+        and _op_supports_kwarg(sgl_attn, "ori_sparse_indices")
+    ):
         return sgl_meta, sgl_attn
     return None
 ```
 
 ```python
 if tree_plan is not None:
-    from ...dspark_tree_ops import compress_nodes
+    from sglang.srt.speculative.dspark_components.dspark_tree_ops import (
+        compress_nodes,
+        get_node_plan,
+    )
     plan = get_node_plan(tree_plan)
     node_kv, _ = compress_nodes(...)
     tree_plan.tree_node_kv[compressor.layer_id] = node_kv
@@ -491,7 +514,7 @@ def _forward_tree_indexer(self, c4_indexer, tree_plan, ...):
 
 ---
 
-## 6. 修复层
+## 6. 修复/适配层
 
 ### 6.1 `hardware_backend/npu/dsv4/dsv4_rope.py`（+5 / −2）
 
