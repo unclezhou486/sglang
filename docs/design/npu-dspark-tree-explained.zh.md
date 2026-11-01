@@ -187,7 +187,7 @@ verify 的行数是 `1 + budget`：1 行是 root/anchor，剩下是候选节点�
 
 参考分支 `feat/npu-dsv4-dspark-topk` 能跑，但：
 
-- 19 文件的 `tree/` 包，测试前约 3,619 行；
+- 19 个文件（18 个 `.py` + README），当前 checkout 共 2,573 行 Python；
 - 默认走 vendor `_C_ascend`，保留 shadow 和 backend switch；
 - 与本次「基于最新 main、只复用 sgl_kernel_npu、最小 delta」的要求冲突。
 
@@ -198,7 +198,7 @@ verify 的行数是 `1 + budget`：1 行是 root/anchor，剩下是候选节点�
 EAGLE 是另一种投机解码。它的树算子和 DSpark 要的树不是一回事：
 
 - EAGLE 的树是均匀 topk 叉，父节点用 `selected_index // topk` 推导；父节点没被选中时直接跳过，不保证 ancestor closure。
-- EAGLE 的接受算子只支持链式，不使用 `retrive_next_token` / `retrive_next_sibling`。
+- 当前 sglang 的 EAGLE `verify_tree_greedy` 已经支持树 accept（用 `retrieve_next_token` / `retrieve_next_sibling`）；但它接受的是均匀 topk、parent-independent 的树，不保证 ancestor closure，也不处理 DSV4 的 per-node 压缩 KV/indexer。
 
 DSpark 需要 ancestor-closed 的树（定义见开头），所以复用 EAGLE 反而要写一个和参考 builder 一样大的适配器，还会产出不同的树。这里的 kernel 名字可以跳过，不影响理解。
 
@@ -663,7 +663,7 @@ PCTree 是 Parent-Conditioned Drafting Tree。它不是按全树共享的 margin
 不完全。论文 Algorithm 1 保留每层所有 local top-k 子节点到候选池，再做 global top-N；本分支沿用 vllm-ascend 的 level-wise builder，每层只写 top-width，最后在已选节点里裁剪。两者都保持 ancestor closure，但不是逐节点等价。详见 4.3.6。
 
 **Q: 为什么不用 EAGLE 的树？**
-EAGLE 是均匀 topk 叉、没有 ancestor closure，accept kernel 只支持链式；复用它产出的树和 DSpark 需要的不一样。
+EAGLE 是均匀 topk 叉、parent-independent、没有 ancestor closure；当前 `verify_tree_greedy` 虽支持树 accept，但它的树和 DSpark 需要的 ancestor-closed + per-node DSV4 状态不是一回事。
 
 **Q: 为什么不用参考分支的 vendor 算子？**
 本次约束是只用 `sgl_kernel_npu`，不引入 vendor `_C_ascend`、shadow、backend switch。
@@ -686,3 +686,4 @@ EAGLE 是均匀 topk 叉、没有 ancestor closure，accept kernel 只支持链�
 - PCTree 论文：From Chains to Trees: Parent-Conditioned Drafting for Semi-Autoregressive Speculative Decoding，arXiv:2608.02123，https://arxiv.org/abs/2608.02123
 - 实现分支：`feat/npu-dsv4-dspark-tree-v5`
 - 参考分支：`feat/npu-dsv4-dspark-topk`（用户已在 TP16 + DP16 上机验证）
+- 后续开发路线（入图、mixed batch、P0-P4 规划）：[dspark-tree-roadmap.zh.md](dspark-tree-roadmap.zh.md)

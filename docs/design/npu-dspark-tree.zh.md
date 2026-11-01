@@ -189,7 +189,7 @@ accept 后链式复算（V1）没有启用：它会在 accept 之后用现有 ch
 
 ### 3.1 不采用方案 A：整体移植参考树层
 
-参考实现的 19 文件 `tree/` 包在测试前就有约 3,619 行生产代码，还带着 vendor `_C_ascend`、shadow、backend switch、节点页提交脚手架。这正是约束禁止、也被用户以“太大”否决的东西。
+参考实现的 `tree/` 包是 19 个文件（18 个 `.py` + README），当前 checkout 共 2,573 行 Python，还带着 vendor `_C_ascend`、shadow、backend switch、节点页提交脚手架。这正是约束禁止、也被用户以“太大”否决的东西。
 
 ### 3.2 不采用方案 B：复用 EAGLE 树算子
 
@@ -198,7 +198,7 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 - `build_tree_kernel.cpp:151,181` 用 `selected_index // topk` 推导父节点，是均匀 topk 叉、parent-major 的候选空间。
 - `build_tree_kernel.cpp:163-165` 在父节点未被选中时直接跳过，不保证 ancestor closure。
 - 参考 DSpark builder 是 ancestor-closed、每层全局 top-width、重新编号的树，两者不是同一棵树。
-- `verify_tree_greedy.py:51` 比较 `candidates[i]` 与 `target_predict[i-1]`，完全不使用 `retrive_next_token` 和 `retrive_next_sibling`，这个 Triton accept kernel 只支持链式。
+- 当前 EAGLE 的 `verify_tree_greedy` 使用 `retrieve_next_token` / `retrieve_next_sibling`，本身支持树 accept；不能复用的原因是 EAGLE 的树均匀 topk、parent-independent、不保证 ancestor closure，而且不处理 DSV4 的 per-node 压缩 KV/indexer。
 
 复用它需要写一个和参考 builder 一样大的适配器，还会产出不同的树，放大静默 orphan 和 accept 错误。
 
@@ -217,10 +217,10 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 3. 所有树入口都接受 `tree_plan=None`，所有树分支都是 `if tree_plan is not None`。
 4. 不新增环境变量；`dspark_planner.py` 不改；`dspark_draft.py` 只新增 `DraftProposal.base_logits` 字段（+5 行），既有逻辑不改。
 5. `DFlashVerifyInput.tree_plan` 默认是 `None`。
-6. 树模式与 deferred commit、compact ragged、watermark、sampling accept graph 互斥，启动即报错。
+6. 树模式与 deferred commit、compact ragged、watermark、sampling accept graph 互斥。compact ragged 在启动时报错；grammar / watermark 在每步验证时报错（fail-loud）。
 7. 树模式关闭 adaptive spec、SPS、STS，不裁剪 verify 宽度。
 8. 混合 prefill+decode batch 不进树 gear。
-9. 树路径的张量预分配、形状固定，每步路径没有 `.item()`、`.tolist()`、`.cpu()`。
+9. 树路径的张量 buffer 预分配、形状固定；但树规划（`plan_tree_pre` / `plan_tree_post`）仍有 `.item()` 读回和按请求的 Python 循环（源码里标注 `# HOST-SYNC`），这是当前只能走 eager 的原因之一。
 10. 回归方式：静态 diff 审计加 CPU 测试，最后在 A3 上与未修改版本逐 token 对齐。
 
 ### 4.2 Fail-loud
@@ -245,16 +245,18 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 - 树要求 `attn_tp_size == 1`；否则 `DSparkMarkovScorer` 会拒绝 vocab-sharded markov。
 - 树模式强制 static ragged，关闭 planner 的动态预算广播和 DP tier all-gather。
 
-### 4.4 图捕获形状
+### 4.4 图捕获现状
 
-树路径从 P2 起就按图捕获约束写：
+树路径当前是 **eager only**，不是 capture-safe：
 
-- 固定容量，每请求 `1 + budget` 行，预分配。
-- 使用静态 k 的 `torch.topk`，不用变长 `argsort`。
-- 每步路径不读回 host，不出现 `.item()`、`.tolist()`、`.cpu()`。
-- 捕获区内不分配，输出写进预分配 buffer。
-- 行数恒定，未用行显式失效。
-- 混合 batch 走 eager 或拒绝。
+- hook 对 `topk>1` 显式 `disable_decode_cuda_graph`；
+- `TreeBuilder` 每步分配 token/parent/path buffer；
+- `build_tree_metadata` / `build_tree_ori_sparse_indices` / `plan_tree_commit` 有 `.item()` / `int()` 读回和逐请求循环；
+- `build_tree_accept_outs` 有 `bool(mask.any())`；
+- node commit / `move_swa_kv` 有 host descriptor 和循环；
+- 树 accept 长度导致 commit shape 动态。
+
+因此 `tree_plan=None` 的 topk=1 仍可走原 decode graph；topk>1 树路径必须 eager。入图计划见 `dspark-tree-roadmap.zh.md`。
 
 当前已知的 kernel 侧图阻塞点：indexer 的 `lengths.max().item()` 和 select-all 分支，`compressor_tree_project` 的校验同步。这些在 `sgl-kernel-npu` 内，不在本仓库。
 
@@ -275,16 +277,16 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 
 | 文件 | 改动 |
 |---|---|
-| `ascend_dsv4_backend.py` | +489：compressor、indexer、SWA、compressed attention 的树分支 |
-| `dspark_worker_v2.py` | +134：tree config、plan pre/post、accept/commit |
-| `dspark_verify.py` | +78：`tree_plan` 参数、树提交分支 |
+| `ascend_dsv4_backend.py` | +478 / −11：compressor、indexer、SWA、compressed attention 的树分支 |
+| `dspark_worker_v2.py` | +132 / −2：tree config、plan pre/post、accept/commit |
+| `dspark_verify.py` | +66 / −12：`tree_plan` 参数、树提交分支 |
 | `dspark_draft.py` | +5：`DraftProposal.base_logits` |
-| `dspark_config.py` | +61：gamma 与 verify 宽度解耦 |
-| `speculative_hook.py` | +94：树参数、宽度解析、门禁 |
+| `dspark_config.py` | +45 / −16：gamma 与 verify 宽度解耦 |
+| `speculative_hook.py` | +55 / −39：树参数、宽度解析、门禁 |
 | `dflash_info.py` | +2：`DFlashVerifyInput.tree_plan` |
-| `dsv4_rope.py` | +7：负位置 clamp |
-| `deepseek_v4_memory_pool.py` | +8：c4 ring 覆盖树宽度 |
-| `fields/spec.py`、`field_order.py`、`spec_info.py` | +27：tree 参数与 draft 宽度 |
+| `dsv4_rope.py` | +5 / −2：负位置 clamp |
+| `deepseek_v4_memory_pool.py` | +7 / −1：c4 ring 覆盖树宽度 |
+| `fields/spec.py`、`field_order.py`、`spec_info.py` | +26 / −1：tree 参数与 draft 宽度 |
 
 ### 5.3 明确不做
 
@@ -340,7 +342,7 @@ V2（四算子对 `tree_reference.py` oracle）必须在 A3 通过后才能签�
 | 4 | markov head 分片或 `attn_tp > 1` | high | `DSparkMarkovScorer` 拒绝 vocab_shard；树要求 attn_tp=1 |
 | 5 | mamba + tree | medium | `_commit_target_mamba_states_after_verify` 保留 topk 断言；DSV4 非 mambaish |
 | 6 | grammar / watermark + tree | medium | 当前 fail loudly；需要时再适配 |
-| 7 | 图捕获被 kernel 侧 host sync 阻塞 | medium | 框架侧已按图写；kernel 修复属于 `sgl-kernel-npu` |
+| 7 | 图捕获被 kernel 侧和树规划侧 host sync 阻塞 | medium | 当前树走 eager；设备化与图计划见 roadmap |
 | 8 | V1 复算与节点页提交不等价 | low（当前路径不受影响） | 只作为 V1 通过后的可选优化 |
 | 9 | 规模高于精简估算 | low | 当前生产约 2,790；需要更小只能等 V1 通过后替换提交路径 |
 
@@ -365,10 +367,11 @@ V2（四算子对 `tree_reference.py` oracle）必须在 A3 通过后才能签�
 
 ## 附录 B：证据锚点
 
-- 方案 B 被证伪：`build_tree_kernel.cpp:151,181`（parent = selected_index // topk）、`:163-165`（orphan 直接 continue）、`verify_tree_greedy.py:51`（chain-only accept）、参考 `tree/builder.py:47-49,99-129`（ancestor-closed）。
+- 方案 B 被证伪：`build_tree_kernel.cpp:151,181`（parent = selected_index // topk）、`:163-165`（orphan 直接 continue）、参考 `tree/builder.py:47-49,99-129`（ancestor-closed）；EAGLE 的 `verify_tree_greedy` 虽支持树 accept，但它的树不含 DSpark 需要的 ancestor-closed / per-node DSV4 状态。
 - 跳过压缩 KV 被证伪：`tree_ops_semantics.md`、`tree_reference.py:539-557`，以及 `prefix % ratio != 0` 的边界残块。
 - DP/TP：`runtime_context.derive_attn_tp_size:73-76`、`fields/parallel.py:203-205`。
 
 ## 延伸阅读
 
 - 从零讲解（适合第一次接触投机解码 / DSV4 的读者）：[npu-dspark-tree-explained.zh.md](npu-dspark-tree-explained.zh.md)
+- 后续开发路线（入图、mixed batch、P0-P4 规划）：[dspark-tree-roadmap.zh.md](dspark-tree-roadmap.zh.md)

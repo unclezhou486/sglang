@@ -2,8 +2,9 @@
 
 > **分支**：`feat/npu-dsv4-dspark-tree-v5`  
 > **基线**：`main = 5d4a6f499e`  
+> **检视 commit**：`6a7d2a2b4d`（2026-11-02 复核）
 > **作者**：`unclezhou486`  
-> **范围**：4 个 commit，17 个文件，+3832 / −84；生产代码约 2.8k 行，测试约 1k 行（66 个 CPU 用例）。
+> **范围**：4 个 commit，17 个文件，+3832 / −84；生产 2,790 行（净增 2,706），测试 1,042 行（66 个 CPU 用例）。
 >
 > **读者**：熟悉 DSpark 基本概念、但不熟 DSV4 内部状态和树算子的工程师。  
 > **用途**：设计评审与检视 onboarding，不是逐行教程，也不替代 `npu-dspark-tree-explained.zh.md` 的从零讲解。
@@ -192,7 +193,7 @@ width = min(topk, vocab, budget)   # 每层实际保留的节点数
 capacity = width * depth           # builder 能物化的非根节点上限
 ```
 
-**注意**：`topk*depth` 是当前 level-wise builder 的**节点容量**，不是路径数。完整 top-k 树的叶子路径数是 `topk^depth`；本实现不会物化它。
+**注意**：`topk*depth` 是 `budget` 的**校验上限**；实际物化容量是 `width*depth`，不是路径数。完整 top-k 树的叶子路径数是 `topk^depth`；本实现不会物化它。
 
 ### 1.3.1 什么是 node pool
 
@@ -426,7 +427,7 @@ verify 阶段每个节点都算了临时 KV，但只有接受路径应该写回�
 
 - EAGLE 的 `build_tree_kernel` 用 `selected_index // topk` 推导 parent，是均匀 topk 叉；
 - 它在 parent 未选中时直接跳过，不保证 ancestor closure；
-- `verify_tree_greedy` 只支持链式 accept；
+- 当前 sglang 的 `verify_tree_greedy` 已经支持树 accept（用 `retrieve_next_token` / `retrieve_next_sibling`）；不能复用的真正原因是 EAGLE 的树均匀 topk、parent-independent、不保证 ancestor closure，而且不处理 DSV4 的 per-node 压缩 KV/indexer；
 - 与 DSpark 的 ancestor-closed 树不是同一棵树。
 
 ---
@@ -549,7 +550,7 @@ sinks / metadata
 cmp_ratio / softmax_scale / ori_win
 ```
 
-**输出**：`out` + `softmax_lse`。
+**输出**：`out`（`_tree_attention` 只取 op 返回的第 0 项；`softmax_lse` 不透出）。
 
 **和原版比**：
 
@@ -594,30 +595,33 @@ base torch.ops.npu.sparse_attn_sharedkv
 
 可见性已经完全编码在 slot 表里，base 算子可以直接算。
 
-### 3.8 与 vllm-ascend 参考实现的对比
+### 3.8 与两个参考实现的对比
 
-> 以下参考实现信息来自现有设计文档【据文档】，未独立核对参考代码。
+这里有两个“参考”，不要混：
 
-| 维度 | vllm-ascend 参考实现 | 本分支 | 说明 / 取舍 |
+- **sglang 参考分支** `feat/npu-dsv4-dspark-topk @ b7c7fa0a`：v5 的直接算法来源；
+- **本地 vllm-ascend 分支** `tree261025-rebase @ 2fe76a173`：更成熟的 tree 实现，用来判断后续优化方向。
+
+| 维度 | sglang 参考 b7c7fa0a | 本地 vllm-ascend tree261025 | 本分支 v5 |
 |---|---|---|---|
-| 代码形态 | 19 文件 `tree/` 包，约 3,619 行生产代码 | 2 个新文件 + 12 个修改，约 2.8k 行生产代码 | 本分支不整包移植 |
-| 树构建 | level-wise builder，ancestor-closed | 同算法，落在 `dspark_tree.py` | 同源，不是逐行复制 |
-| 压缩 | vendor `_C_ascend` / tree package | 四个 `sgl_kernel_npu.tree` 适配 | 语义复用，接口重写 |
-| Indexer | tree indexer | `quant_lightning_indexer_tree` | 同上 |
-| 注意力 | native tree attention + backend switch | `sparse_attn_sharedkv_tree` + SWA base | 不引入 backend switch |
-| 提交 | node store / KV binding + node commit | freeze/commit + `move_swa_kv` | 复用节点页提交思路 |
-| 配置 | `tree_spec_config` | 两个 CLI + width resolver | 本分支补 sglang 接线 |
-| 测试 | 外部 workspace e2e + 算子测试 | CPU 66 例 | 本分支无 A3 e2e |
-| 上游状态 | fork，未合 upstream | 基于 `sglang main = 5d4a6f499e` | 本分支更接近可合入 |
-| 硬件 | A2/A3；A5/arch35 不支持 | 目标 Ascend，A3 关卡待跑 | 两边都未覆盖 A5 |
-| 图模式 | 支持 eager / FULL graph | eager only | 本分支未做图 |
-| 并行 | TP16/DP16 验证过 | 要求 `attn_tp=1`；DP/TP 未验 | 参考更成熟 |
-| PD / KV transfer | 禁止 | 不支持 | 一致 |
-| 文档 / 示例 | 文档、示例缺失 | 3 份中文文档 | 本分支补了文档 |
+| 代码形态 | 19 文件（18 个 `.py` + README），2,573 行 Python | 19 个 `.py` 3,826 行 + 12 个 Triton 文件 1,051 行 + C++ 算子 | 2 文件，1,969 行 |
+| 树构建 | level-wise builder | level-wise builder + depth_penalty/keep_origin_chain/Domino/DFlash | 同算法，DSV4 only |
+| 后端 | vendor 默认 / `sgl_kernel_npu` / shadow | C++ `_C_ascend` + Triton + native | 只用 `sgl_kernel_npu` |
+| 图模式 | eager only（README 明确 graph 不安全） | FULL graph + mixed batch | eager only，显式关 decode graph |
+| 模型 | DSV4 | Qwen3 + DSV4，DFlash/Domino | DSV4 |
+| 测试 | 78 CPU 用例 | 1 个 unit 文件（3 test fn / 21 cases），本任务未复验 | 66 CPU 用例 |
+| 硬件 | 参考已在 TP16/DP16 上机 | 本任务未复验 | A3 待跑 |
+
+**怎么读这张表**：
+
+- v5 的算法来源是 sglang 参考分支，不是 vllm-ascend 的完整 tree 框架；
+- sglang 参考证明算法/生命周期可行；它有 `sgl_kernel_npu` 选项，但默认 vendor，也没有图/mixed batch；
+- vllm-ascend 分支证明图/mixed batch 可做，但那是另一套 C++/Triton/runtime；
+- v5 只保留 `sgl_kernel_npu` + eager + DSV4，因此必须重新做 V2/A3，不能把两个参考的验证结果直接相加。
 
 **结论**：
 
-> 参考实现证明的是“这条树路径在 TP16/DP16 上能跑”，不是“可以直接搬进 sglang”。本分支复用的是算法语义、四个算子的契约、节点页提交思路；不复用的是整包结构、vendor 算子、backend switch 和外部验证方式。两边都没做 A5；本分支也还没做 A3 和 V2。
+> v5 的直接来源是 sglang 参考分支；它证明的是“这条树路径在 TP16/DP16 上能跑”，不是“v5 的 `sgl_kernel_npu` 路径已经被验证”。vllm-ascend 分支是后续图/mixed batch 的优化参考，不是 v5 的直接 baseline。v5 目前只完成 CPU 和静态检查，A3/V2 仍未跑。
 
 ### 3.9 调用关系
 
@@ -765,7 +769,7 @@ worker._forward_decode
 
 **topk=1**：`_tree_config` 为 `None` 或 `topk<=1` 时，`tree_pre/tree_post` 都不生成，走原 accept/commit。
 
-### 5.3 后端层：`ascend_dsv4_backend.py`（+489）
+### 5.3 后端层：`ascend_dsv4_backend.py`（+478 / −11，489 changed）
 
 四条树路由：
 
@@ -1010,7 +1014,9 @@ prefix = 14
 | 7 | `ori_sparse_indices` 128 对齐 | `build_tree_ori_sparse_indices` | kernel 拒绝或越界 |
 | 8 | 未用节点完整失效 | layout/metadata | accept 误走无效分支 |
 | 9 | topk=1 全短路 | worker/backend/verify | 链式行为改变 |
-| 10 | 树 accept 只按 greedy | `greedy_tree_accept` + argmax | 采样请求输出错误 |
+| 10 | 树 accept 只支持 greedy；非 greedy 目前未显式拒绝 | `greedy_tree_accept` + argmax；worker 未检查 `is_all_greedy` | 采样请求会静默按 argmax 接受，输出错误；生产前必须 fail-loud 或实现 tree sampling |
+
+> 第 10 条不是已强制的不变量，而是当前限制。生产前必须在 `dspark_worker_v2` 的树分支加 `sampling_info.is_all_greedy` 检查，或实现 tree sampling。
 
 **fail-loud 清单**：
 
@@ -1039,6 +1045,7 @@ prefix = 14
 | 四个 NPU 算子数值（V2） | 【未验证】 |
 | backend/worker 运行时 | 【未验证】 |
 | A3 eager、greedy 一致性 | 【未验证】 |
+| 非 greedy 树路径 | 【未验证/未拒绝】 |
 | TP16 / DP16 | 【未验证】 |
 | 图捕获 | 【设计意图】当前 eager only |
 
@@ -1047,13 +1054,13 @@ prefix = 14
 | # | 风险 | 严重度 | 现状 | 建议 |
 |---|---|---|---|---|
 | 1 | 四算子与 CPU oracle 不一致 | high | 未跑 | A3 上跑 V2 |
-| 2 | backend/worker 集成 shape/顺序错误 | high | 未跑 | A3 (a)–(d) |
+| 2 | backend/worker 集成 shape/顺序错误 | high | 未跑 | A3 (a)–(e) |
 | 3 | DP token 计数不匹配 | high | 未验 | 断言 `num_tokens_per_req == 1+budget` |
 | 4 | markov 分片 / `attn_tp>1` | high | 显式拒绝 | 保持 fail loud |
 | 5 | grammar / watermark + 树 | medium | 显式拒绝 | 需要时再适配 |
 | 6 | 图捕获被 host sync 阻塞 | medium | eager only | 先做固定 shape |
 | 7 | V1 复算与节点页不等价 | low | 未启用 | 仅作可选优化 |
-| 8 | 树只支持 greedy | medium | 未显式拒绝非 greedy | 需作者确认 |
+| 8 | 树只支持 greedy，且非 greedy 未显式拒绝 | high | 未显式拒绝非 greedy | 生产前加 fail-loud（推荐）或实现 tree sampling |
 
 ### 8.3 不能入图的直接原因
 
@@ -1068,12 +1075,13 @@ prefix = 14
 
 1. 树是否只支持 greedy？非 greedy sampling 是否应该显式拒绝？
 2. 是否要强制保留 greedy 链（`keep_greedy=True` 当前未启用）？
-3. A3 的 (a)–(d) 结果如何？accept length 收益是否大于 verify 成本？
+3. A3 的 (a)–(e) 结果如何？accept length 收益是否大于 verify 成本？（若 (d) 为负，再进入架构文档的 (f) graph capture 兜底。）
 4. V2 四算子一致性何时做？
 5. host sync 对首 token 延迟的影响有多大？
 6. c4 ring 扩宽的显存代价是否可接受？
 7. TP/DP 下的 `num_tokens_per_req` 如何保证？
-8. 文档说“请求树但 topk<2 报错”，实际 topk=1 是允许的，口径是否统一？
+8. 已确认：`topk=1` 允许且走链式，只有 `topk>1` 才树；旧文档“topk<2 报错”的口径应删除。
+9. 非 greedy sampling 是否要在树分支显式拒绝？当前没有，建议生产前加 fail-loud。
 
 ---
 
@@ -1225,3 +1233,9 @@ raw KV 可以用 sparse indices 救；压缩块在 compressor 阶段已经把兄
 > **承认树在 verify 期间破坏了“position ↔ 唯一 KV”的假设**，因此必须把节点 id、祖先链、压缩状态和提交路径都显式化。
 
 四个算子负责“按节点算”，节点页提交负责“只写 winner”，worker/backend 负责“把这条链路接起来”。topk=1 通过 `tree_plan=None` 全短路保持不变。
+
+---
+
+## 11. 后续开发
+
+后续入图、mixed batch、设备化、测试与 A3 验收的分阶段计划见 [dspark-tree-roadmap.zh.md](dspark-tree-roadmap.zh.md)。

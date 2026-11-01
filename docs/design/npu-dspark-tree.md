@@ -189,7 +189,7 @@ Post-accept chain re-compress (V1) is not enabled: it would re-compress the acce
 
 ### 3.1 Scheme A not adopted: port the reference tree layer wholesale
 
-The reference implementation's 19-file `tree/` package has about 3,619 production lines before tests, and it carries vendor `_C_ascend`, shadow, backend switch, and node-page commit scaffolding. This is exactly what the constraints forbid and what the user rejected as "too large".
+The reference `tree/` package is 19 files (18 `.py` plus a README), 2,573 Python lines in the current checkout, and it carries vendor `_C_ascend`, shadow, backend switch, and node-page commit scaffolding. This is exactly what the constraints forbid and what the user rejected as "too large".
 
 ### 3.2 Scheme B not adopted: reuse the EAGLE tree operators
 
@@ -198,7 +198,7 @@ EAGLE's `build_tree_kernel_efficient` and `verify_tree_greedy` cannot be used di
 - `build_tree_kernel.cpp:151,181` derives the parent with `selected_index // topk`, a uniform topk-ary, parent-major candidate space.
 - `build_tree_kernel.cpp:163-165` skips a node outright when its parent was not selected, so ancestor closure is not guaranteed.
 - The reference DSpark builder is an ancestor-closed, per-level global top-width, renumbered tree; the two are not the same tree.
-- `verify_tree_greedy.py:51` compares `candidates[i]` with `target_predict[i-1]` and never uses `retrive_next_token` and `retrive_next_sibling`; this Triton accept kernel supports chains only.
+- Current EAGLE `verify_tree_greedy` uses `retrieve_next_token` / `retrieve_next_sibling` and supports tree accept; it cannot be reused because EAGLE trees are uniform topk, parent-independent, not ancestor-closed, and do not carry DSV4 per-node compressed KV/indexer state.
 
 Reusing it would need an adapter as large as the reference builder, and it would produce a different tree, amplifying silent orphan and accept errors.
 
@@ -217,10 +217,10 @@ Tree attention resolves compressed slots `k >= prefix // ratio` to the node pool
 3. Every tree entry point accepts `tree_plan=None`, and every tree branch is `if tree_plan is not None`.
 4. No new environment variables; `dspark_planner.py` is unchanged; `dspark_draft.py` only adds the `DraftProposal.base_logits` field (+5 lines), with existing logic unchanged.
 5. `DFlashVerifyInput.tree_plan` defaults to `None`.
-6. Tree mode is mutually exclusive with deferred commit, compact ragged, watermark, and the sampling accept graph; it errors at startup.
+6. Tree mode is mutually exclusive with deferred commit, compact ragged, watermark, and the sampling accept graph. Compact ragged fails at startup; grammar/watermark fail at runtime (fail-loud).
 7. Tree mode turns off adaptive spec, SPS, and STS, and does not trim the verify width.
 8. A mixed prefill+decode batch does not enter the tree gear.
-9. Tree-path tensors are preallocated with fixed shapes; the per-step path has no `.item()`, `.tolist()`, or `.cpu()`.
+9. Tree-path tensor buffers are preallocated with fixed shapes, but tree planning (`plan_tree_pre` / `plan_tree_post`) still has `.item()` readbacks and per-request Python loops (`# HOST-SYNC` in the source); this is one reason the tree path runs eager.
 10. Regression method: static diff audit plus CPU tests, then token-by-token alignment against the unmodified build on A3.
 
 ### 4.2 Fail-loud
@@ -245,16 +245,18 @@ The reference implementation was verified on TP16 + DP16, a topology that corres
 - The tree requires `attn_tp_size == 1`; otherwise `DSparkMarkovScorer` rejects vocab-sharded markov.
 - Tree mode forces static ragged and turns off the planner's dynamic budget broadcast and DP tier all-gather.
 
-### 4.4 Graph capture shape
+### 4.4 Graph capture status
 
-The tree path was written against graph capture constraints from P2 onward:
+The tree path is currently **eager only** and not capture-safe:
 
-- Fixed capacity, `1 + budget` rows per request, preallocated.
-- Static-k `torch.topk`, not variable-length `argsort`.
-- No host readback in the per-step path; no `.item()`, `.tolist()`, `.cpu()`.
-- No allocation inside the capture region; outputs go into preallocated buffers.
-- Constant row count, with unused rows explicitly invalidated.
-- Mixed batches run eager or are rejected.
+- the hook explicitly disables the decode graph for `topk>1`;
+- `TreeBuilder` allocates token/parent/path buffers every step;
+- `build_tree_metadata` / `build_tree_ori_sparse_indices` / `plan_tree_commit` contain `.item()` / `int()` readbacks and per-request loops;
+- `build_tree_accept_outs` contains `bool(mask.any())`;
+- node commit / `move_swa_kv` use host descriptors and loops;
+- tree accept length makes the commit shape dynamic.
+
+So topk=1 with `tree_plan=None` can still use the original decode graph; the topk>1 tree path must run eager. See `dspark-tree-roadmap.zh.md` for the capture plan.
 
 Current known kernel-side graph blockers: the indexer's `lengths.max().item()` and select-all branch, and the validation sync in `compressor_tree_project`. These live in `sgl-kernel-npu`, not in this repository.
 
@@ -275,16 +277,16 @@ Current known kernel-side graph blockers: the indexer's `lengths.max().item()` a
 
 | file | change |
 |---|---|
-| `ascend_dsv4_backend.py` | +489: tree branches for compressor, indexer, SWA, and compressed attention |
-| `dspark_worker_v2.py` | +134: tree config, plan pre/post, accept/commit |
-| `dspark_verify.py` | +78: `tree_plan` argument, tree commit branch |
+| `ascend_dsv4_backend.py` | +478 / −11: tree branches for compressor, indexer, SWA, and compressed attention |
+| `dspark_worker_v2.py` | +132 / −2: tree config, plan pre/post, accept/commit |
+| `dspark_verify.py` | +66 / −12: `tree_plan` argument, tree commit branch |
 | `dspark_draft.py` | +5: `DraftProposal.base_logits` |
-| `dspark_config.py` | +61: decouple gamma from verify width |
-| `speculative_hook.py` | +94: tree arguments, width resolution, gating |
+| `dspark_config.py` | +45 / −16: decouple gamma from verify width |
+| `speculative_hook.py` | +55 / −39: tree arguments, width resolution, gating |
 | `dflash_info.py` | +2: `DFlashVerifyInput.tree_plan` |
-| `dsv4_rope.py` | +7: negative position clamp |
-| `deepseek_v4_memory_pool.py` | +8: c4 ring covering the tree width |
-| `fields/spec.py`, `field_order.py`, `spec_info.py` | +27: tree arguments and draft width |
+| `dsv4_rope.py` | +5 / −2: negative position clamp |
+| `deepseek_v4_memory_pool.py` | +7 / −1: c4 ring covering the tree width |
+| `fields/spec.py`, `field_order.py`, `spec_info.py` | +26 / −1: tree arguments and draft width |
 
 ### 5.3 Explicitly not doing
 
@@ -340,7 +342,7 @@ V2 (the four operators against the `tree_reference.py` oracle) must pass on A3 b
 | 4 | Markov head sharding or `attn_tp > 1` | high | `DSparkMarkovScorer` rejects vocab_shard; the tree requires attn_tp=1 |
 | 5 | mamba + tree | medium | `_commit_target_mamba_states_after_verify` keeps the topk assert; DSV4 is not mambaish |
 | 6 | grammar / watermark + tree | medium | Fail loudly for now; adapt later if needed |
-| 7 | Graph capture blocked by kernel-side host sync | medium | The framework side is already written for graphs; the kernel fix belongs to `sgl-kernel-npu` |
+| 7 | Graph capture blocked by kernel-side and tree-planning host sync | medium | The tree runs eager today; see the roadmap for deviceization and capture stages |
 | 8 | V1 re-compress is not equivalent to node-page commit | low (current path unaffected) | Only an optional optimization after V1 passes |
 | 9 | Size above the lean estimate | low | Current production about 2,790; going smaller must wait for V1 to replace the commit path |
 
@@ -365,10 +367,11 @@ V2 (the four operators against the `tree_reference.py` oracle) must pass on A3 b
 
 ## Appendix B: Evidence anchors
 
-- Scheme B falsified: `build_tree_kernel.cpp:151,181` (parent = selected_index // topk), `:163-165` (orphans hit a bare continue), `verify_tree_greedy.py:51` (chain-only accept), reference `tree/builder.py:47-49,99-129` (ancestor-closed).
+- Scheme B falsified: `build_tree_kernel.cpp:151,181` (parent = selected_index // topk), `:163-165` (orphans hit a bare continue), reference `tree/builder.py:47-49,99-129` (ancestor-closed). EAGLE `verify_tree_greedy` does support tree accept, but its tree lacks DSpark ancestor closure and per-node DSV4 state.
 - Skipping compressed KV falsified: `tree_ops_semantics.md`, `tree_reference.py:539-557`, and the boundary partial block at `prefix % ratio != 0`.
 - DP/TP: `runtime_context.derive_attn_tp_size:73-76`, `fields/parallel.py:203-205`.
 
 ## Further reading
 
 - From-scratch walkthrough (Chinese): [npu-dspark-tree-explained.zh.md](npu-dspark-tree-explained.zh.md)
+- Roadmap (Chinese, graph capture and mixed batch): [dspark-tree-roadmap.zh.md](dspark-tree-roadmap.zh.md)
