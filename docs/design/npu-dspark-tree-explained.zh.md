@@ -687,3 +687,4 @@ EAGLE 是均匀 topk 叉、parent-independent、没有 ancestor closure；当前
 - 实现分支：`feat/npu-dsv4-dspark-tree-v5`
 - 参考分支：`feat/npu-dsv4-dspark-topk`（用户已在 TP16 + DP16 上机验证）
 - 后续开发路线（入图、mixed batch、P0-P4 规划）：[dspark-tree-roadmap.zh.md](dspark-tree-roadmap.zh.md)
+- 既有文件修改说明（12 个公共文件逐文件讲解）：[dspark-tree-modified-files.zh.md](dspark-tree-modified-files.zh.md)

@@ -375,3 +375,4 @@ V2 (the four operators against the `tree_reference.py` oracle) must pass on A3 b
 
 - From-scratch walkthrough (Chinese): [npu-dspark-tree-explained.zh.md](npu-dspark-tree-explained.zh.md)
 - Roadmap (Chinese, graph capture and mixed batch): [dspark-tree-roadmap.zh.md](dspark-tree-roadmap.zh.md)
+- Modified-files walkthrough (Chinese, 12 shared files): [dspark-tree-modified-files.zh.md](dspark-tree-modified-files.zh.md)

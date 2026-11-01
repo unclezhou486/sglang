@@ -375,3 +375,4 @@ V2（四算子对 `tree_reference.py` oracle）必须在 A3 通过后才能签�
 
 - 从零讲解（适合第一次接触投机解码 / DSV4 的读者）：[npu-dspark-tree-explained.zh.md](npu-dspark-tree-explained.zh.md)
 - 后续开发路线（入图、mixed batch、P0-P4 规划）：[dspark-tree-roadmap.zh.md](dspark-tree-roadmap.zh.md)
+- 既有文件修改说明（12 个公共文件逐文件讲解）：[dspark-tree-modified-files.zh.md](dspark-tree-modified-files.zh.md)

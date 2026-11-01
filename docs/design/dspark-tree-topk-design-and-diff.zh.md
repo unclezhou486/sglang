@@ -1239,3 +1239,4 @@ raw KV 可以用 sparse indices 救；压缩块在 compressor 阶段已经把兄
 ## 11. 后续开发
 
 后续入图、mixed batch、设备化、测试与 A3 验收的分阶段计划见 [dspark-tree-roadmap.zh.md](dspark-tree-roadmap.zh.md)。
+- 既有文件逐文件修改说明：[dspark-tree-modified-files.zh.md](dspark-tree-modified-files.zh.md)

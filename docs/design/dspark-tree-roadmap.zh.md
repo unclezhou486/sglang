@@ -553,3 +553,9 @@ P0 正确性
 ```
 
 在 P0/P1/P2 完成之前，不要把“树比 topk=1 快”当作既定事实；在 A3 (d) 跑出 accept length 和每轮延迟之前，也不要把树设为默认路径。
+
+---
+
+## 15. 相关文档
+
+- 既有 12 个生产文件的逐文件修改说明：[dspark-tree-modified-files.zh.md](dspark-tree-modified-files.zh.md)
