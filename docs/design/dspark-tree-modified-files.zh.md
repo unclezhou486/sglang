@@ -602,7 +602,7 @@ if self.is_dspark() and is_draft_worker:
 
 ## 8. 验证状态
 
-- CPU：75/75 通过（含 core / ops / host-opt / rope）；
+- CPU：76/76 通过（含 core / ops / host-opt / rope）；
 - `py_compile` / 静态检查通过；
 - A3 eager、greedy 一致性、accept length、TP16/DP16：**未跑**；
 - V2 四算子对 oracle：**未跑**；

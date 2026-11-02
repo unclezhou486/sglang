@@ -1,10 +1,10 @@
 # DSV4 + DSpark tree speculative decoding (topk > 1) on Ascend NPU
 
-> **Status: v5.3 implemented, CPU 75/75 passing, A3 hardware gates pending.**
+> **Status: v5.3 implemented, CPU 76/76 passing, A3 hardware gates pending.**
 > Branch: `feat/npu-dsv4-dspark-tree-v5`, baseline `main = 5d4a6f499e`, latest code commit `52a388a233`, pushed to `unclezhou`. v5.3 is the revision number of the document; the branch name keeps the `-v5` from when it was created.
-> Runtime backends: `vendor` (vllm-ascend `_C_ascend`, default) or `sgl_kernel_npu` (in-tree Triton), selected by `SGLANG_DSPARK_TREE_BACKEND`.
+> Runtime backends: `sgl_kernel_npu` (in-tree Triton, default) or `vendor` (vllm-ascend `_C_ascend`), selected by `SGLANG_DSPARK_TREE_BACKEND`.
 > Scale: 17 files = 2 new files + 12 production modifications + 3 test files; production code remains about 2,800 lines. The latest backend/cache update adds no new file.
-> CPU verification: `python3 -m pytest -q test/registered/unit/spec/test_dspark_tree_core.py test/registered/unit/spec/test_dspark_tree_ops.py test/registered/unit/spec/test_dspark_tree_host_opt.py test/registered/unit/spec/test_dspark_tree_rope.py` (75 passed).
+> CPU verification: `python3 -m pytest -q test/registered/unit/spec/test_dspark_tree_core.py test/registered/unit/spec/test_dspark_tree_ops.py test/registered/unit/spec/test_dspark_tree_host_opt.py test/registered/unit/spec/test_dspark_tree_rope.py` (76 passed).
 
 ---
 
@@ -58,8 +58,8 @@ The four operators have two implementations:
 
 | backend | implementation | selection |
 |---|---|---|
-| `vendor` (default) | vllm-ascend `_C_ascend` AscendC bindings | `SGLANG_DSPARK_TREE_BACKEND=vendor` plus `SGLANG_DSPARK_TREE_OPS=/path/a.so:/path/b.so:/path/c.so` |
-| `sgl_kernel_npu` | in-tree Triton package | `SGLANG_DSPARK_TREE_BACKEND=sgl_kernel_npu` or aliases `triton` / `sgl` |
+| `sgl_kernel_npu` (default) | in-tree Triton package | unset `SGLANG_DSPARK_TREE_BACKEND`, or set `sgl_kernel_npu` / aliases `triton` / `sgl` |
+| `vendor` | vllm-ascend `_C_ascend` AscendC bindings | `SGLANG_DSPARK_TREE_BACKEND=vendor` plus `SGLANG_DSPARK_TREE_OPS=/path/a.so:/path/b.so:/path/c.so` |
 
 The vendor binding is loaded explicitly with `torch.ops.load_library`; SGLang does not import vllm. If the selected backend is unavailable, the op raises instead of silently falling through.
 
@@ -118,7 +118,7 @@ Per-step caching lives on `NodePlan`: `cu_seqlens_cache`, `max_seqlen_cache`, `a
 | `fields/spec.py` | add two tree arguments | none |
 | `field_order.py` | register the two arguments | none |
 | `spec_info.py` | draft width comes from `speculative_dspark_block_size`, no longer derived from the verify width | topk=1 equals `num_draft-1` |
-| 3 test files | 75 CPU cases: core, ops, host-opt, rope | no NPU involved |
+| 3 test files | 76 CPU cases: core, ops, host-opt, rope | no NPU involved |
 
 **Not modified**: `dspark_planner.py`, `dspark_kv_inject.py`, `dspark_deferred_commit.py`, `base_spec_worker.py`. `dspark_draft.py` only gains +5 lines exposing `base_logits`; its existing logic is unchanged.
 
@@ -245,7 +245,7 @@ Tree attention resolves compressed slots `k >= prefix // ratio` to the node pool
 1. `speculative_eagle_topk` defaults to 1. The explicit code gate is the DSpark path plus the tree switch; NPU and DSV4 are implicit prerequisites (tree branches exist only in `ascend_dsv4_backend`), not startup checks.
 2. With `topk=1`, `verify_num_draft_tokens == gamma + 1`.
 3. Every tree entry point accepts `tree_plan=None`, and every tree branch is `if tree_plan is not None`.
-4. Two optional runtime variables exist: `SGLANG_DSPARK_TREE_BACKEND` selects `vendor` or `sgl_kernel_npu`; `SGLANG_DSPARK_TREE_OPS` lists the vendor binding `.so` files. `dspark_planner.py` is unchanged; `dspark_draft.py` only adds the `DraftProposal.base_logits` field (+5 lines), with existing logic unchanged.
+4. Two optional runtime variables exist: `SGLANG_DSPARK_TREE_BACKEND` selects `sgl_kernel_npu` (default) or `vendor`; `SGLANG_DSPARK_TREE_OPS` lists the vendor binding `.so` files. `dspark_planner.py` is unchanged; `dspark_draft.py` only adds the `DraftProposal.base_logits` field (+5 lines), with existing logic unchanged.
 5. `DFlashVerifyInput.tree_plan` defaults to `None`.
 6. Tree mode is mutually exclusive with deferred commit, compact ragged, watermark, and the sampling accept graph. Compact ragged fails at startup; grammar/watermark fail at runtime (fail-loud).
 7. Tree mode turns off adaptive spec, SPS, and STS, and does not trim the verify width.
@@ -333,7 +333,7 @@ Current known kernel-side graph blockers: the indexer's `lengths.max().item()` a
 
 ### 6.1 Verified
 
-- CPU: 75/75 passing across `test_dspark_tree_core.py`, `test_dspark_tree_ops.py`, `test_dspark_tree_host_opt.py`, and `test_dspark_tree_rope.py`.
+- CPU: 76/76 passing across `test_dspark_tree_core.py`, `test_dspark_tree_ops.py`, `test_dspark_tree_host_opt.py`, and `test_dspark_tree_rope.py`.
 - `py_compile` and `compileall` pass on every changed file.
 - Production code is backend-neutral: `dspark_tree.py` contains no device backend; `dspark_tree_ops.py` owns the vendor/Triton switch.
 - Tests cover tree topology, ancestor closure, metadata, sparse slots, accept/output, commit plan, NodePlan, backend loader contracts, RoPE clamp, and width configuration.

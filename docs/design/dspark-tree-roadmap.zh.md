@@ -1,7 +1,7 @@
 # DSV4 + DSpark 树形投机解码：后续开发路线
 
 > **基线**：`feat/npu-dsv4-dspark-tree-v5 @ 52a388a233`
-> **当前状态**：CPU 75/75 通过；A3/V2 未跑；树模式 eager；mixed batch 未支持；非 greedy 未显式拒绝；vendor / `sgl_kernel_npu` backend 已接入
+> **当前状态**：CPU 76/76 通过；A3/V2 未跑；树模式 eager；mixed batch 未支持；非 greedy 未显式拒绝；vendor / `sgl_kernel_npu` backend 已接入
 > **直接参考**：sglang 参考分支 `feat/npu-dsv4-dspark-topk @ b7c7fa0a`  
 > **优化参考**：本地 vllm-ascend `tree261025-rebase @ 2fe76a173`  
 > **目标**：从 correctness-first 的 eager 树，推进到可生产、可回滚、可测性能的树路径  
@@ -88,7 +88,7 @@ P0 + P1 + P2 全量 + P3 + P4
 | 图捕获 | 显式关闭 decode graph | 性能可能明显落后于链式图模式 |
 | mixed batch | `is_extend_in_batch` 被路由到 prefill | 树不会在 mixed batch 里执行 |
 | DP token 计数 | 未在 A3 验证 | collective 计数不一致可能挂死 |
-| 测试覆盖 | 75 个，接近参考 78 个 | attention/indexer/node_pool 专项覆盖仍可补 |
+| 测试覆盖 | 76 个，接近参考 78 个 | attention/indexer/node_pool 专项覆盖仍可补 |
 
 ### 1.3 当前树路径的主要 host sync
 
@@ -112,8 +112,8 @@ P0 + P1 + P2 全量 + P3 + P4
 `52a388a233` 之后，四个 tree 算子支持：
 
 ```text
-SGLANG_DSPARK_TREE_BACKEND=vendor        # 默认，vllm-ascend _C_ascend
-SGLANG_DSPARK_TREE_BACKEND=sgl_kernel_npu # 仓内 Triton
+SGLANG_DSPARK_TREE_BACKEND=sgl_kernel_npu # 默认，仓内 Triton
+SGLANG_DSPARK_TREE_BACKEND=vendor        # vllm-ascend _C_ascend
 SGLANG_DSPARK_TREE_OPS=...               # vendor binding .so 列表
 ```
 
@@ -241,7 +241,7 @@ if tree_pre is not None and run_compact:
 
 ### 3.6 测试覆盖补齐
 
-当前 75 个测试接近参考 78 个。建议迁移/补齐：
+当前 76 个测试接近参考 78 个。建议迁移/补齐：
 
 - attention metadata / tree attention 契约；
 - indexer select-all / 短历史；

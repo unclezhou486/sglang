@@ -4,13 +4,13 @@
 > **基线**：`main = 5d4a6f499e`  
 > **检视 commit**：`52a388a233`（2026-11-02 复核）
 > **作者**：`unclezhou486`  
-> **范围**：17 个文件，生产约 2,800 行；测试 75 个 CPU 用例。
+> **范围**：17 个文件，生产约 2,800 行；测试 76 个 CPU 用例。
 >
 > **读者**：熟悉 DSpark 基本概念、但不熟 DSV4 内部状态和树算子的工程师。  
 > **用途**：设计评审与检视 onboarding，不是逐行教程，也不替代 `npu-dspark-tree-explained.zh.md` 的从零讲解。
 >
 > **状态标记**：
-> - 【已验证】CPU 75/75 通过；
+> - 【已验证】CPU 76/76 通过；
 > - 【设计意图】代码已写、硬件未验证；
 > - 【未验证】A3/V2、backend 运行时、TP/DP、性能；
 > - 【据文档】来自现有设计文档，未独立核对参考实现代码。
@@ -606,10 +606,10 @@ base torch.ops.npu.sparse_attn_sharedkv
 |---|---|---|---|
 | 代码形态 | 19 文件（18 个 `.py` + README），2,573 行 Python | 19 个 `.py` 3,826 行 + 12 个 Triton 文件 1,051 行 + C++ 算子 | 2 文件，1,969 行 |
 | 树构建 | level-wise builder | level-wise builder + depth_penalty/keep_origin_chain/Domino/DFlash | 同算法，DSV4 only |
-| 后端 | vendor 默认 / `sgl_kernel_npu` / shadow | C++ `_C_ascend` + Triton + native | `vendor`（默认）/ `sgl_kernel_npu`，无 shadow |
+| 后端 | vendor 默认 / `sgl_kernel_npu` / shadow | C++ `_C_ascend` + Triton + native | `sgl_kernel_npu`（默认）/ `vendor`，无 shadow |
 | 图模式 | eager only（README 明确 graph 不安全） | FULL graph + mixed batch | eager only，显式关 decode graph |
 | 模型 | DSV4 | Qwen3 + DSV4，DFlash/Domino | DSV4 |
-| 测试 | 78 CPU 用例 | 1 个 unit 文件（3 test fn / 21 cases），本任务未复验 | 75 CPU 用例 |
+| 测试 | 78 CPU 用例 | 1 个 unit 文件（3 test fn / 21 cases），本任务未复验 | 76 CPU 用例 |
 | 硬件 | 参考已在 TP16/DP16 上机 | 本任务未复验 | A3 待跑 |
 
 **怎么读这张表**：
@@ -706,7 +706,7 @@ worker commit
 | `test_dspark_tree_ops.py` | 368+ | NodePlan、算子契约、indexer、节点提交、vendor / Triton backend |
 | `test_dspark_tree_rope.py` | 35 | 负 position clamp |
 
-合计 75 例（core + ops + host-opt + rope）【已验证】。
+合计 76 例（core + ops + host-opt + rope）【已验证】。
 
 **能证明**：
 
@@ -1039,7 +1039,7 @@ prefix = 14
 
 | 项目 | 状态 |
 |---|---|
-| 纯 torch 树逻辑 | 【已验证】CPU 75/75 |
+| 纯 torch 树逻辑 | 【已验证】CPU 76/76 |
 | 算子调用契约 / backend | 【已验证】CPU host-opt + backend loader |
 | RoPE clamp | 【已验证】CPU 1 例 |
 | 四个 NPU 算子数值（V2） | 【未验证】 |

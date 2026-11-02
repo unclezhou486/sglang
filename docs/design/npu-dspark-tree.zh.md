@@ -1,10 +1,10 @@
 # DSV4 + DSpark 树形投机解码（topk > 1）Ascend NPU 架构
 
-> **状态：v5.3 已实现，CPU 75/75 通过，A3 硬件关卡待执行。**
+> **状态：v5.3 已实现，CPU 76/76 通过，A3 硬件关卡待执行。**
 > 分支：`feat/npu-dsv4-dspark-tree-v5`，基线 `main = 5d4a6f499e`，最新代码提交 `52a388a233`，已推送到 `unclezhou`。v5.3 是文档修订号，分支名保留创建时的 `-v5`。
-> 运行时后端：`vendor`（vllm-ascend `_C_ascend`，默认）或 `sgl_kernel_npu`（仓内 Triton），由 `SGLANG_DSPARK_TREE_BACKEND` 选择。
+> 运行时后端：`sgl_kernel_npu`（仓内 Triton，默认）或 `vendor`（vllm-ascend `_C_ascend`），由 `SGLANG_DSPARK_TREE_BACKEND` 选择。
 > 规模：17 文件 = 2 个新文件 + 12 个生产修改 + 3 个测试文件；生产代码仍约 2,800 行。最新 backend/cache 更新没有新增文件。
-> CPU 验证：`python3 -m pytest -q test/registered/unit/spec/test_dspark_tree_core.py test/registered/unit/spec/test_dspark_tree_ops.py test/registered/unit/spec/test_dspark_tree_host_opt.py test/registered/unit/spec/test_dspark_tree_rope.py`（75 passed）。
+> CPU 验证：`python3 -m pytest -q test/registered/unit/spec/test_dspark_tree_core.py test/registered/unit/spec/test_dspark_tree_ops.py test/registered/unit/spec/test_dspark_tree_host_opt.py test/registered/unit/spec/test_dspark_tree_rope.py`（76 passed）。
 
 ---
 
@@ -58,8 +58,8 @@ topk=1 完全不经过树：`tree_plan` 默认为 `None`，所有树分支短路
 
 | backend | 实现 | 选择方式 |
 |---|---|---|
-| `vendor`（默认） | vllm-ascend `_C_ascend` AscendC binding | `SGLANG_DSPARK_TREE_BACKEND=vendor` + `SGLANG_DSPARK_TREE_OPS=/path/a.so:/path/b.so:/path/c.so` |
-| `sgl_kernel_npu` | 仓内 Triton package | `SGLANG_DSPARK_TREE_BACKEND=sgl_kernel_npu`（别名 `triton` / `sgl`） |
+| `sgl_kernel_npu`（默认） | 仓内 Triton package | 不设置 `SGLANG_DSPARK_TREE_BACKEND`，或设为 `sgl_kernel_npu` / 别名 `triton` / `sgl` |
+| `vendor` | vllm-ascend `_C_ascend` AscendC binding | `SGLANG_DSPARK_TREE_BACKEND=vendor` + `SGLANG_DSPARK_TREE_OPS=/path/a.so:/path/b.so:/path/c.so` |
 
 vendor binding 由 `torch.ops.load_library` 显式加载；SGLang 不 import vllm。选中的 backend 不可用时直接报错，不静默回退。
 
@@ -118,7 +118,7 @@ Triton 实现只校验 metadata ABI、不读内容，所以 zero metadata 只适
 | `fields/spec.py` | 增加两个 tree 参数 | 无 |
 | `field_order.py` | 注册两个参数 | 无 |
 | `spec_info.py` | draft 宽度取 `speculative_dspark_block_size`，不再从 verify 宽度推导 | topk=1 等于 `num_draft-1` |
-| 3 个测试文件 | 75 个 CPU 用例：core、ops、host-opt、rope | 不涉及 NPU |
+| 3 个测试文件 | 76 个 CPU 用例：core、ops、host-opt、rope | 不涉及 NPU |
 
 **不改**：`dspark_planner.py`、`dspark_kv_inject.py`、`dspark_deferred_commit.py`、`base_spec_worker.py`。`dspark_draft.py` 仅 +5 行暴露 `base_logits`，既有逻辑不改。
 
@@ -245,7 +245,7 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 1. `speculative_eagle_topk` 默认是 1；代码显式门禁是 DSpark 路径 + 显式开树开关，NPU/DSV4 是隐式前提（树分支只存在于 `ascend_dsv4_backend`）。
 2. `topk=1` 时 `verify_num_draft_tokens == gamma + 1`。
 3. 所有树入口都接受 `tree_plan=None`，所有树分支都是 `if tree_plan is not None`。
-4. 不新增环境变量；`dspark_planner.py` 不改；`dspark_draft.py` 只新增 `DraftProposal.base_logits` 字段（+5 行），既有逻辑不改。
+4. 两个可选运行时变量：`SGLANG_DSPARK_TREE_BACKEND` 选择 `sgl_kernel_npu`（默认）或 `vendor`；`SGLANG_DSPARK_TREE_OPS` 列出 vendor binding `.so`。`dspark_planner.py` 不改；`dspark_draft.py` 只新增 `DraftProposal.base_logits` 字段（+5 行），既有逻辑不改。
 5. `DFlashVerifyInput.tree_plan` 默认是 `None`。
 6. 树模式与 deferred commit、compact ragged、watermark、sampling accept graph 互斥。compact ragged 在启动时报错；grammar / watermark 在每步验证时报错（fail-loud）。
 7. 树模式关闭 adaptive spec、SPS、STS，不裁剪 verify 宽度。
@@ -333,7 +333,7 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 
 ### 6.1 已验证
 
-- CPU：75/75 通过，覆盖 `test_dspark_tree_core.py`、`test_dspark_tree_ops.py`、`test_dspark_tree_host_opt.py`、`test_dspark_tree_rope.py`。
+- CPU：76/76 通过，覆盖 `test_dspark_tree_core.py`、`test_dspark_tree_ops.py`、`test_dspark_tree_host_opt.py`、`test_dspark_tree_rope.py`。
 - `py_compile` 和 `compileall` 全部改动文件通过。
 - 生产代码 backend-neutral：`dspark_tree.py` 不含设备 backend；`dspark_tree_ops.py` 持有 vendor/Triton 切换。
 - AST 检查：跨模块 import 和调用签名没有缺失。
