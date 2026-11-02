@@ -1,11 +1,11 @@
 # DSV4 + DSpark 树形投机解码：后续开发路线
 
-> **基线**：`feat/npu-dsv4-dspark-tree-v5 @ 6a7d2a2b4d`  
-> **当前状态**：CPU 66/66 通过；A3/V2 未跑；树模式 eager；mixed batch 未支持；非 greedy 未显式拒绝  
+> **基线**：`feat/npu-dsv4-dspark-tree-v5 @ 52a388a233`
+> **当前状态**：CPU 75/75 通过；A3/V2 未跑；树模式 eager；mixed batch 未支持；非 greedy 未显式拒绝；vendor / `sgl_kernel_npu` backend 已接入
 > **直接参考**：sglang 参考分支 `feat/npu-dsv4-dspark-topk @ b7c7fa0a`  
 > **优化参考**：本地 vllm-ascend `tree261025-rebase @ 2fe76a173`  
 > **目标**：从 correctness-first 的 eager 树，推进到可生产、可回滚、可测性能的树路径  
-> **非目标**：重写 PCTree 算法；改变 topk=1 链式路径；重新引入 vendor `_C_ascend` / shadow / backend switch
+> **非目标**：重写 PCTree 算法；改变 topk=1 链式路径；引入 shadow
 
 ---
 
@@ -88,7 +88,7 @@ P0 + P1 + P2 全量 + P3 + P4
 | 图捕获 | 显式关闭 decode graph | 性能可能明显落后于链式图模式 |
 | mixed batch | `is_extend_in_batch` 被路由到 prefill | 树不会在 mixed batch 里执行 |
 | DP token 计数 | 未在 A3 验证 | collective 计数不一致可能挂死 |
-| 测试覆盖 | 66 个，低于参考 78 个 | attention/indexer/node_pool 专项覆盖不足 |
+| 测试覆盖 | 75 个，接近参考 78 个 | attention/indexer/node_pool 专项覆盖仍可补 |
 
 ### 1.3 当前树路径的主要 host sync
 
@@ -107,6 +107,35 @@ P0 + P1 + P2 全量 + P3 + P4
 
 这些是 P1 的主要工作，也是 P2 入图的硬前提。
 
+### 1.4 最新 backend 与 per-step cache
+
+`52a388a233` 之后，四个 tree 算子支持：
+
+```text
+SGLANG_DSPARK_TREE_BACKEND=vendor        # 默认，vllm-ascend _C_ascend
+SGLANG_DSPARK_TREE_BACKEND=sgl_kernel_npu # 仓内 Triton
+SGLANG_DSPARK_TREE_OPS=...               # vendor binding .so 列表
+```
+
+vendor 的 indexer / attention 需要真实 metadata：
+
+```text
+npu_quant_lightning_indexer_v2_metadata
+npu_sparse_attn_sharedkv_metadata
+```
+
+Triton 的 metadata 只做 ABI 校验，不能把 zero metadata 用于 vendor。
+
+`NodePlan` 已经缓存同一 verify step 内的：
+
+```text
+cu_seqlens / max_seqlen / attention metadata
+indexer lengths / max_kv / indexer schedule
+select-all / compressor residue
+```
+
+这去掉了逐层重复构造和 host readback，但不修复通信瓶颈；通信层问题仍需要全 rank 数据和独立排查。
+
 ---
 
 ## 2. 目标与非目标
@@ -122,7 +151,7 @@ P0 + P1 + P2 全量 + P3 + P4
 
 - 不重写 PCTree；builder/scoring/accept 语义保持不变；
 - 不改变 topk=1 的链式输出；
-- 不恢复 vendor `_C_ascend`、shadow、backend switch；
+- 不恢复 `shadow`；`vendor` / `sgl_kernel_npu` 两个 backend 已接入，但都要通过各自的 V2/A3 验证；
 - 不为了开图而牺牲正确性；
 - 不在没有 A3 数据的情况下承诺性能收益。
 
@@ -212,7 +241,7 @@ if tree_pre is not None and run_compact:
 
 ### 3.6 测试覆盖补齐
 
-当前 66 个测试低于参考 78 个。建议迁移/补齐：
+当前 75 个测试接近参考 78 个。建议迁移/补齐：
 
 - attention metadata / tree attention 契约；
 - indexer select-all / 短历史；

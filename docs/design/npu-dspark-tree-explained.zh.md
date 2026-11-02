@@ -38,12 +38,12 @@
 
 - 新增 2 个文件：`dspark_tree.py`（纯 Python/torch 的树核心）和 `dspark_tree_ops.py`（NPU 设备层）。
 - 修改 12 个生产文件、增加 3 个测试文件。
-- 只使用 `sgl_kernel_npu` 的四个树算子，不使用 vendor `_C_ascend`（厂商算子库）、shadow（影子实现）、backend switch（可切换后端的开关）。
+- 四个树算子支持两个 backend：`vendor`（vllm-ascend `_C_ascend`，默认）和 `sgl_kernel_npu`（仓内 Triton），由 `SGLANG_DSPARK_TREE_BACKEND` 切换；不支持 shadow。
 - 提交路径沿用参考实现在 16 卡张量并行 + 16 路数据并行（TP16 + DP16）上验证过的节点页提交（node-page commit）。
 
 **当前状态**：
 
-- CPU 66/66 测试通过。
+- CPU 75/75 测试通过。
 - `py_compile`、静态检查、禁用项检查通过。
 - A3 硬件上的 eager、greedy 一致性、accept length、TP16/DP16 还没有跑。
 - 所以：**代码完成，CPU 验证完成，硬件验证待做**。
@@ -188,8 +188,8 @@ verify 的行数是 `1 + budget`：1 行是 root/anchor，剩下是候选节点�
 参考分支 `feat/npu-dsv4-dspark-topk` 能跑，但：
 
 - 19 个文件（18 个 `.py` + README），当前 checkout 共 2,573 行 Python；
-- 默认走 vendor `_C_ascend`，保留 shadow 和 backend switch；
-- 与本次「基于最新 main、只复用 sgl_kernel_npu、最小 delta」的要求冲突。
+- 默认走 vendor `_C_ascend`，并保留 shadow 和 backend switch；
+- 当前分支不复制它的 tree 包，但在 `dspark_tree_ops.py` 内接入了 `vendor` / `sgl_kernel_npu` 两个 backend；shadow 不接。
 
 所以不是复制，而是在 `main` 上重新实现同样的语义。
 
@@ -454,7 +454,7 @@ topk=1 的对照：链只有 A -> B -> D -> H 这一条，verify 4 行，`budget
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `dspark_tree.py` | 1,134 | 拓扑、ancestor closure、metadata、sparse slots、accept/output、commit plan。只 import torch 和标准库。 |
-| `dspark_tree_ops.py` | 835 | NodePlan、四个树算子、节点页提交、SWA 搬移。唯一设备边界，直连 `sgl_kernel_npu`，无 vendor 回退。 |
+| `dspark_tree_ops.py` | ~1,100 | NodePlan、backend 切换、四个树算子、节点页提交、SWA 搬移、per-step cache。唯一设备边界，支持 vendor / `sgl_kernel_npu`。 |
 
 ### 6.3 修改 12 个生产文件 + 3 个测试文件
 
@@ -474,7 +474,7 @@ topk=1 的对照：链只有 A -> B -> D -> H 这一条，verify 4 行，`budget
 | `fields/spec.py` | 增加两个 tree 参数 | 无 |
 | `field_order.py` | 注册两个参数 | 无 |
 | `spec_info.py` | draft 宽度取 `speculative_dspark_block_size`，不再从 verify 宽度推导 | topk=1 等于 `num_draft-1` |
-| 3 个测试文件 | 66 个 CPU 用例：core 45、op 20、rope 1 | 不涉及 NPU |
+| 3 个测试文件 | 75 个 CPU 用例：core、ops、host-opt、rope | 不涉及 NPU |
 
 ### 6.4 不改
 
@@ -570,7 +570,7 @@ python3 -m pytest -q \
   test/registered/unit/spec/test_dspark_tree_rope.py
 ```
 
-结果：66/66 通过。覆盖：
+结果：75/75 通过。覆盖：
 
 - 树拓扑、ancestor closure、metadata、sparse slots；
 - accept/output、commit plan；
@@ -578,12 +578,12 @@ python3 -m pytest -q \
 - RoPE 负位置 clamp；
 - 宽度配置。
 
-这些测试不执行 NPU 算子，四个 `sgl_kernel_npu.tree` 算子只验证调用契约。
+这些测试不执行 NPU 算子，四个树算子只验证调用契约和 backend loader。
 
 ### 9.2 静态检查
 
 - `py_compile` / `compileall` 全部改动文件通过。
-- 生产代码没有 `_C_ascend`、`SGLANG_DSPARK_TREE_BACKEND`、`tree/` 包引用。
+- `dspark_tree.py` 没有设备 backend；`dspark_tree_ops.py` 持有 vendor / `sgl_kernel_npu` 切换。
 - AST 检查跨模块 import 和调用签名。
 
 ### 9.3 A3 关卡
@@ -666,13 +666,13 @@ PCTree 是 Parent-Conditioned Drafting Tree。它不是按全树共享的 margin
 EAGLE 是均匀 topk 叉、parent-independent、没有 ancestor closure；当前 `verify_tree_greedy` 虽支持树 accept，但它的树和 DSpark 需要的 ancestor-closed + per-node DSV4 状态不是一回事。
 
 **Q: 为什么不用参考分支的 vendor 算子？**
-本次约束是只用 `sgl_kernel_npu`，不引入 vendor `_C_ascend`、shadow、backend switch。
+现在可以用：四个算子支持 `vendor`（默认，vllm-ascend `_C_ascend`）和 `sgl_kernel_npu`（仓内 Triton）。vendor 路径需要 `SGLANG_DSPARK_TREE_OPS` 指向三个 binding `.so`，并补齐 indexer / attention 的真实 metadata；不接 shadow。
 
 **Q: 为什么当前用节点页提交，而不是 accept 后复算？**
 节点页提交是参考实现已经在 TP16/DP16 上验证的路径；复算（V1）还没证明逐位等价，所以先保证功能正确。
 
-**Q: 为什么只有 66 个 CPU 测试，而不是 78？**
-参考分支的 78 个里，有一批只覆盖参考专用 helper（例如 `plan_tree_round`、`apply_tree_commit`、`build_chain_*`），这些 helper 不在运行时路径，已经删除；保留的 66 个覆盖运行时和不变量。
+**Q: 为什么现在只有 75 个 CPU 测试，而不是 78？**
+参考分支的 78 个里，有一批只覆盖参考专用 helper（例如 `plan_tree_round`、`apply_tree_commit`、`build_chain_*`），这些 helper 不在运行时路径，已经删除；当前 75 个覆盖运行时、backend loader、host 优化和不变量。
 
 **Q: 现在可以直接上生产吗？**
 不行。CPU 和静态检查通过，但 A3 的 eager、greedy 一致性、accept length、TP16/DP16、V2 都还没做。

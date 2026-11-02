@@ -1,9 +1,10 @@
 # DSV4 + DSpark 树形投机解码（topk > 1）Ascend NPU 架构
 
-> **状态：v5.2 已实现，CPU 66/66 通过，A3 硬件关卡待执行。**
-> 分支：`feat/npu-dsv4-dspark-tree-v5`，基线 `main = 5d4a6f499e`，已推送到 `unclezhou`。v5.2 是文档与实现的修订号，分支名保留创建时的 `-v5`。
-> 规模：17 文件 = 2 个新文件 + 12 个生产修改 + 3 个测试文件；`+3,832 / −84`，生产约 2,790 行（净增 2,706），测试约 1,042 行（66 例）。
-> CPU 验证：`python3 -m pytest -q test/registered/unit/spec/test_dspark_tree_core.py test/registered/unit/spec/test_dspark_tree_ops.py test/registered/unit/spec/test_dspark_tree_rope.py`
+> **状态：v5.3 已实现，CPU 75/75 通过，A3 硬件关卡待执行。**
+> 分支：`feat/npu-dsv4-dspark-tree-v5`，基线 `main = 5d4a6f499e`，最新代码提交 `52a388a233`，已推送到 `unclezhou`。v5.3 是文档修订号，分支名保留创建时的 `-v5`。
+> 运行时后端：`vendor`（vllm-ascend `_C_ascend`，默认）或 `sgl_kernel_npu`（仓内 Triton），由 `SGLANG_DSPARK_TREE_BACKEND` 选择。
+> 规模：17 文件 = 2 个新文件 + 12 个生产修改 + 3 个测试文件；生产代码仍约 2,800 行。最新 backend/cache 更新没有新增文件。
+> CPU 验证：`python3 -m pytest -q test/registered/unit/spec/test_dspark_tree_core.py test/registered/unit/spec/test_dspark_tree_ops.py test/registered/unit/spec/test_dspark_tree_host_opt.py test/registered/unit/spec/test_dspark_tree_rope.py`（75 passed）。
 
 ---
 
@@ -43,13 +44,42 @@
 
 ### 2.1 方案 C
 
-**后端中立的纯 torch 树核心 + 四个 `sgl_kernel_npu` 树算子适配器 + 参考实现已验证的节点页提交。**
+**后端中立的纯 torch 树核心 + 四个树算子适配器（vendor / Triton 双后端）+ 参考实现已验证的节点页提交。**
 
 - `dspark_tree.py`：拓扑、ancestor closure、metadata、sparse slots、accept/output、commit plan。只依赖 torch 和标准库，可在 CPU 上测试，也可在 GPU 上复用。
-- `dspark_tree_ops.py`：唯一的设备边界。NodePlan、四个 `sgl_kernel_npu.tree` 算子、节点页提交、SWA 行搬移。没有 vendor 回退、没有 shadow、没有环境变量开关。
+- `dspark_tree_ops.py`：唯一的设备边界。NodePlan、四个树算子、节点页提交、SWA 行搬移，以及运行时 backend 切换。
 - `ascend_dsv4_backend.py`：只做路由。当 `tree_plan is not None` 时，把 compressor、indexer、SWA、compressed attention 分派给 `dspark_tree_ops`。
 
 topk=1 完全不经过树：`tree_plan` 默认为 `None`，所有树分支短路，走 `main` 原有的链式路径。
+
+### 2.1.1 运行时 backend
+
+四个算子有两个实现：
+
+| backend | 实现 | 选择方式 |
+|---|---|---|
+| `vendor`（默认） | vllm-ascend `_C_ascend` AscendC binding | `SGLANG_DSPARK_TREE_BACKEND=vendor` + `SGLANG_DSPARK_TREE_OPS=/path/a.so:/path/b.so:/path/c.so` |
+| `sgl_kernel_npu` | 仓内 Triton package | `SGLANG_DSPARK_TREE_BACKEND=sgl_kernel_npu`（别名 `triton` / `sgl`） |
+
+vendor binding 由 `torch.ops.load_library` 显式加载；SGLang 不 import vllm。选中的 backend 不可用时直接报错，不静默回退。
+
+算子映射：
+
+| 公共 API | vendor binding |
+|---|---|
+| `compressor_tree_project` | `torch.ops._C_ascend.compressor_tree_project` |
+| `compressor_tree` | `torch.ops._C_ascend.compressor_tree` |
+| `quant_lightning_indexer_tree` | `torch.ops._C_ascend.quant_lightning_indexer_tree` |
+| `sparse_attn_sharedkv_tree` | `torch.ops._C_ascend.npu_sparse_attn_sharedkv_tree` |
+
+vendor 的 indexer / attention 需要真实调度 metadata：
+
+- indexer：`npu_quant_lightning_indexer_v2_metadata`
+- attention：`npu_sparse_attn_sharedkv_metadata`
+
+Triton 实现只校验 metadata ABI、不读内容，所以 zero metadata 只适用于 `sgl_kernel_npu`。
+
+`NodePlan` 上缓存 per-step 结果：`cu_seqlens_cache`、`max_seqlen_cache`、`attn_metadata_cache`、`indexer_lengths_cache`、`max_kv_cache`、`indexer_metadata_cache`、`select_all_cache`、`residue_cache`，避免同一 verify step 的每一层重复构造 vendor schedule 和 host readback。
 
 ### 2.2 架构落地：复用、修改、新增
 
@@ -70,7 +100,7 @@ topk=1 完全不经过树：`tree_plan` 默认为 `None`，所有树分支短路
 | 文件 | 职责 | 边界 |
 |---|---|---|
 | `dspark_tree.py` | 拓扑、ancestor closure、metadata、sparse slots、accept/output、commit plan | 只 import torch 和标准库，不 import 设备 |
-| `dspark_tree_ops.py` | NodePlan、四个树算子、节点页提交、SWA 搬移 | 唯一设备边界，直连 `sgl_kernel_npu`，无 vendor 回退 |
+| `dspark_tree_ops.py` | NodePlan、四个树算子、节点页提交、SWA 搬移、backend 切换 | 唯一设备边界，支持 vendor / `sgl_kernel_npu` |
 
 **修改（12 个生产文件 + 3 个测试文件）**
 
@@ -88,7 +118,7 @@ topk=1 完全不经过树：`tree_plan` 默认为 `None`，所有树分支短路
 | `fields/spec.py` | 增加两个 tree 参数 | 无 |
 | `field_order.py` | 注册两个参数 | 无 |
 | `spec_info.py` | draft 宽度取 `speculative_dspark_block_size`，不再从 verify 宽度推导 | topk=1 等于 `num_draft-1` |
-| 3 个测试文件 | 66 个 CPU 用例：core 45、op 20、rope 1 | 不涉及 NPU |
+| 3 个测试文件 | 75 个 CPU 用例：core、ops、host-opt、rope | 不涉及 NPU |
 
 **不改**：`dspark_planner.py`、`dspark_kv_inject.py`、`dspark_deferred_commit.py`、`base_spec_worker.py`。`dspark_draft.py` 仅 +5 行暴露 `base_logits`，既有逻辑不改。
 
@@ -156,7 +186,7 @@ sparse_attn_sharedkv_tree(q, ori_kv, cmp_kv, cmp_tree_kv=node_kv,
 契约要点：
 
 - `compressor_tree_project` 是唯一 in-place 的算子，`nodes` 必须预分配。
-- `metadata` 是 int32[1024]，校验后忽略，传静态零即可。
+- `metadata` 是 int32[1024]。Triton backend 校验后忽略，传静态零即可；vendor backend 需要 `npu_sparse_attn_sharedkv_metadata` / `npu_quant_lightning_indexer_v2_metadata` 生成的真实调度 metadata。
 - `cu` 只用于断言“一 query 一节点”。
 - `seqused_kv = prefix + depth + 1`。
 - `ori_sparse_indices` 宽度必须是 128 的倍数。
@@ -189,7 +219,7 @@ accept 后链式复算（V1）没有启用：它会在 accept 之后用现有 ch
 
 ### 3.1 不采用方案 A：整体移植参考树层
 
-参考实现的 `tree/` 包是 19 个文件（18 个 `.py` + README），当前 checkout 共 2,573 行 Python，还带着 vendor `_C_ascend`、shadow、backend switch、节点页提交脚手架。这正是约束禁止、也被用户以“太大”否决的东西。
+参考实现的 `tree/` 包是 19 个文件（18 个 `.py` + README），当前 checkout 共 2,573 行 Python，还带着 vendor `_C_ascend`、shadow、backend switch、节点页提交脚手架。我们不复制整个包，但 `dspark_tree_ops.py` 接入了 `vendor` / `sgl_kernel_npu` 两个 backend，并去掉了 shadow。
 
 ### 3.2 不采用方案 B：复用 EAGLE 树算子
 
@@ -269,7 +299,7 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `dspark_components/dspark_tree.py` | 1,134 | 设备无关的 tree 核心 |
-| `dspark_components/dspark_tree_ops.py` | 835 | NodePlan、四个树算子、节点页提交、SWA 搬移 |
+| `dspark_components/dspark_tree_ops.py` | ~1,100 | NodePlan、backend 切换、四个树算子、节点页提交、SWA 搬移、per-step cache |
 
 `dspark_tree.py` 分成 config、scoring/builder、layout、metadata、sparse、accept/output、commit plan、round 八节。`dspark_tree_ops.py` 分成 node plan、compressor、indexer、attention、node commit 五节。
 
@@ -293,7 +323,7 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 - 不新建 `tree/` 文件夹。
 - 不复制 SGLang。
 - 不新增第二个 DSpark worker、算法枚举、`SpecInputType` 或 `ForwardBatch` 字段。
-- 不引入 vendor `_C_ascend`、shadow、`SGLANG_DSPARK_TREE_BACKEND`。
+- 不引入 `shadow`；支持 `vendor` 和 `sgl_kernel_npu` 两个 backend。
 - 不在框架层重写四个算子。
 - 不在 A3 的 (a) 到 (d) 通过前调 tiling 或 kernel。
 
@@ -303,15 +333,16 @@ EAGLE 的 `build_tree_kernel_efficient` 和 `verify_tree_greedy` 不能直接用
 
 ### 6.1 已验证
 
-- CPU：66/66 通过。45 core、20 op contract、1 RoPE clamp。环境是 torch 2.9.1+cpu，Python 3.14 venv。
+- CPU：75/75 通过，覆盖 `test_dspark_tree_core.py`、`test_dspark_tree_ops.py`、`test_dspark_tree_host_opt.py`、`test_dspark_tree_rope.py`。
 - `py_compile` 和 `compileall` 全部改动文件通过。
-- 生产代码没有 `_C_ascend`、`SGLANG_DSPARK_TREE_BACKEND`、`tree/` 包引用。
+- 生产代码 backend-neutral：`dspark_tree.py` 不含设备 backend；`dspark_tree_ops.py` 持有 vendor/Triton 切换。
 - AST 检查：跨模块 import 和调用签名没有缺失。
 - 测试覆盖树拓扑、ancestor closure、metadata、sparse slots、accept/output、commit plan、NodePlan、算子调用契约、RoPE clamp、宽度配置。
 
 ### 6.2 未验证
 
-- 四个 `sgl_kernel_npu.tree` 算子的真实数值（V2）。
+- 四个算子在 vendor / `sgl_kernel_npu` 两个 backend 下的真实数值（V2）。
+- 在 A3 上加载三个 vendor binding `.so` 和 vendor metadata op。
 - backend 和 worker 的真实运行时集成。
 - A3 eager、greedy 一致性、accept length 与 verify 成本。
 - TP16/DP16。

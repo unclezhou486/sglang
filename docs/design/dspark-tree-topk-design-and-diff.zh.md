@@ -2,15 +2,15 @@
 
 > **分支**：`feat/npu-dsv4-dspark-tree-v5`  
 > **基线**：`main = 5d4a6f499e`  
-> **检视 commit**：`6a7d2a2b4d`（2026-11-02 复核）
+> **检视 commit**：`52a388a233`（2026-11-02 复核）
 > **作者**：`unclezhou486`  
-> **范围**：4 个 commit，17 个文件，+3832 / −84；生产 2,790 行（净增 2,706），测试 1,042 行（66 个 CPU 用例）。
+> **范围**：17 个文件，生产约 2,800 行；测试 75 个 CPU 用例。
 >
 > **读者**：熟悉 DSpark 基本概念、但不熟 DSV4 内部状态和树算子的工程师。  
 > **用途**：设计评审与检视 onboarding，不是逐行教程，也不替代 `npu-dspark-tree-explained.zh.md` 的从零讲解。
 >
 > **状态标记**：
-> - 【已验证】CPU 66/66 通过；
+> - 【已验证】CPU 75/75 通过；
 > - 【设计意图】代码已写、硬件未验证；
 > - 【未验证】A3/V2、backend 运行时、TP/DP、性能；
 > - 【据文档】来自现有设计文档，未独立核对参考实现代码。
@@ -606,10 +606,10 @@ base torch.ops.npu.sparse_attn_sharedkv
 |---|---|---|---|
 | 代码形态 | 19 文件（18 个 `.py` + README），2,573 行 Python | 19 个 `.py` 3,826 行 + 12 个 Triton 文件 1,051 行 + C++ 算子 | 2 文件，1,969 行 |
 | 树构建 | level-wise builder | level-wise builder + depth_penalty/keep_origin_chain/Domino/DFlash | 同算法，DSV4 only |
-| 后端 | vendor 默认 / `sgl_kernel_npu` / shadow | C++ `_C_ascend` + Triton + native | 只用 `sgl_kernel_npu` |
+| 后端 | vendor 默认 / `sgl_kernel_npu` / shadow | C++ `_C_ascend` + Triton + native | `vendor`（默认）/ `sgl_kernel_npu`，无 shadow |
 | 图模式 | eager only（README 明确 graph 不安全） | FULL graph + mixed batch | eager only，显式关 decode graph |
 | 模型 | DSV4 | Qwen3 + DSV4，DFlash/Domino | DSV4 |
-| 测试 | 78 CPU 用例 | 1 个 unit 文件（3 test fn / 21 cases），本任务未复验 | 66 CPU 用例 |
+| 测试 | 78 CPU 用例 | 1 个 unit 文件（3 test fn / 21 cases），本任务未复验 | 75 CPU 用例 |
 | 硬件 | 参考已在 TP16/DP16 上机 | 本任务未复验 | A3 待跑 |
 
 **怎么读这张表**：
@@ -617,11 +617,11 @@ base torch.ops.npu.sparse_attn_sharedkv
 - v5 的算法来源是 sglang 参考分支，不是 vllm-ascend 的完整 tree 框架；
 - sglang 参考证明算法/生命周期可行；它有 `sgl_kernel_npu` 选项，但默认 vendor，也没有图/mixed batch；
 - vllm-ascend 分支证明图/mixed batch 可做，但那是另一套 C++/Triton/runtime；
-- v5 只保留 `sgl_kernel_npu` + eager + DSV4，因此必须重新做 V2/A3，不能把两个参考的验证结果直接相加。
+- v5 支持 `vendor` / `sgl_kernel_npu` 两个 backend，但仍只支持 eager + DSV4；两个 backend 都必须重新做 V2/A3，不能把参考分支的验证结果直接相加。
 
 **结论**：
 
-> v5 的直接来源是 sglang 参考分支；它证明的是“这条树路径在 TP16/DP16 上能跑”，不是“v5 的 `sgl_kernel_npu` 路径已经被验证”。vllm-ascend 分支是后续图/mixed batch 的优化参考，不是 v5 的直接 baseline。v5 目前只完成 CPU 和静态检查，A3/V2 仍未跑。
+> v5 的直接来源是 sglang 参考分支；它证明的是“这条树路径在 TP16/DP16 上能跑”，不是“v5 的 vendor / `sgl_kernel_npu` 路径已经被验证”。vllm-ascend 分支是后续图/mixed batch 的优化参考，不是 v5 的直接 baseline。v5 目前只完成 CPU 和静态检查，两个 backend 的 A3/V2 仍未跑。
 
 ### 3.9 调用关系
 
@@ -672,14 +672,14 @@ worker commit
 
 **边界**：只依赖 torch 和标准库；不 import `torch_npu` / `sgl_kernel_npu` / ACL。
 
-### 4.2 `dspark_tree_ops.py`（835 行）
+### 4.2 `dspark_tree_ops.py`（~1,100 行）
 
 **定位**：树路径唯一的 NPU 设备边界。
 
 | 区块 | 关键内容 | 作用 |
 |---|---|---|
 | NodePlan | `NodePlan`、`build_node_plan`、`get_node_plan` | 扁平节点几何，祖先全局化 |
-| 算子加载 | `_load_compressor_ops`、`_load_indexer_op`、`_load_attention_op` | 只认 `sgl_kernel_npu.tree` |
+| 算子加载 | `_load_compressor_ops`、`_load_sgl_kernel_indexer_op`、`_load_vendor_indexer_op`、`_load_attention_op` | `vendor` 走 `_C_ascend`，`sgl_kernel_npu` 走仓内 Triton |
 | 压缩 | `compress_nodes` | 投影 + 按祖先聚合 |
 | 注意力 | `build_tree_attn_metadata`、`build_tree_attn_kwargs`、`attend_nodes` | 树注意力 ABI |
 | Indexer | `quantize_indexer_nodes`、`tree_indexer_select_all`、`tree_indexer` | 逐节点 c4 top-k |
@@ -693,20 +693,20 @@ worker commit
 
 **边界规则**：
 
-- 没有 vendor `_C_ascend` 回退；
-- 缺失算子直接 `RuntimeError`；
+- `vendor` 走 vllm-ascend `_C_ascend`，`sgl_kernel_npu` 走仓内 Triton；
+- 选中的 backend 缺失算子直接 `RuntimeError`，不静默切到另一个 backend；
 - 两个提交 kernel 是本仓唯一新增的设备代码；
-- 四个重算子来自外部 `sgl_kernel_npu.tree`。
+- vendor 的 indexer / attention 需要真实 metadata op；Triton 的 metadata 只做 ABI 校验。
 
 ### 4.3 测试文件
 
 | 文件 | 行数 | 覆盖 |
 |---|---:|---|
 | `test_dspark_tree_core.py` | 639 | shape、layout、scoring、builder、accept、output、metadata、sparse、commit、config |
-| `test_dspark_tree_ops.py` | 368 | NodePlan、算子契约、indexer、节点提交、无 vendor 回退 |
+| `test_dspark_tree_ops.py` | 368+ | NodePlan、算子契约、indexer、节点提交、vendor / Triton backend |
 | `test_dspark_tree_rope.py` | 35 | 负 position clamp |
 
-合计 66 例（45 core + 20 ops + 1 rope）【已验证】。
+合计 75 例（core + ops + host-opt + rope）【已验证】。
 
 **能证明**：
 
@@ -1039,8 +1039,8 @@ prefix = 14
 
 | 项目 | 状态 |
 |---|---|
-| 纯 torch 树逻辑 | 【已验证】CPU 66/66 |
-| 算子调用契约 | 【已验证】CPU 20 例 |
+| 纯 torch 树逻辑 | 【已验证】CPU 75/75 |
+| 算子调用契约 / backend | 【已验证】CPU host-opt + backend loader |
 | RoPE clamp | 【已验证】CPU 1 例 |
 | 四个 NPU 算子数值（V2） | 【未验证】 |
 | backend/worker 运行时 | 【未验证】 |

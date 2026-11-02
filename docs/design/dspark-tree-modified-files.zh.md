@@ -1,7 +1,7 @@
 # DSV4 + DSpark 树形投机解码：既有生产文件修改说明（公共部分）
 
 > **范围**：只讲 12 个既有生产文件的修改，不展开新增的 `dspark_tree.py` / `dspark_tree_ops.py`，也不逐行讲 3 个测试文件。  
-> **基线**：`main = 5d4a6f499e`；实现分支 `feat/npu-dsv4-dspark-tree-v5 @ 6a7d2a2b4d`。  
+> **基线**：`main = 5d4a6f499e`；实现分支 `feat/npu-dsv4-dspark-tree-v5 @ 52a388a233`。
 > **用途**：给评审和 onboarding 看的“改了什么、为什么改、topk=1 有没有受影响”。  
 > **配套文档**：
 > - 设计与差异：[dspark-tree-topk-design-and-diff.zh.md](dspark-tree-topk-design-and-diff.zh.md)
@@ -55,7 +55,7 @@
 | 12 | `python/sglang/srt/speculative/dflash_info.py` | +2 / −0 | `DFlashVerifyInput.tree_plan` |
 
 合计：**+821 / −84**。  
-再加上 2 个新文件（`dspark_tree.py` 1,134 + `dspark_tree_ops.py` 835），才是生产新增 2,790 行（净增 2,706）。
+再加上 2 个新文件（`dspark_tree.py` 1,134 + `dspark_tree_ops.py` ~1,100），才是生产新增约 3,050 行（净增约 2,970）。
 
 下面按“配置层 → 接线层 → 后端层 → 修复/适配层”讲，和上面的文件编号顺序不同。
 
@@ -602,7 +602,7 @@ if self.is_dspark() and is_draft_worker:
 
 ## 8. 验证状态
 
-- CPU：66/66 通过；
+- CPU：75/75 通过（含 core / ops / host-opt / rope）；
 - `py_compile` / 静态检查通过；
 - A3 eager、greedy 一致性、accept length、TP16/DP16：**未跑**；
 - V2 四算子对 oracle：**未跑**；
