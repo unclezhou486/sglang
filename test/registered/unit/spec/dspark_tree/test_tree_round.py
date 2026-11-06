@@ -1,7 +1,10 @@
 """CPU tests for the one-call tree round orchestration."""
 
+from unittest import mock
+
 import torch
 
+from tree.commit import plan_tree_commit
 from tree.config import resolve_tree_config
 from tree.round import plan_tree_post, plan_tree_pre, plan_tree_round
 
@@ -79,6 +82,24 @@ def test_tree_round_budget_above_gamma_uses_budget_width():
     assert plan.ori_sparse_indices.shape == (9, 1, 128)
     assert plan.outputs.out_tokens.shape == (1, 9)
     assert plan.outputs.accept_index.shape == (1, 9)
+
+
+def test_commit_plan_uses_path_width_without_device_readback():
+    with mock.patch.object(
+        torch.Tensor, "item", side_effect=AssertionError("device readback")
+    ):
+        plan = plan_tree_commit(
+            path_node_ids=torch.tensor([[1, 3, -1, -1]]),
+            verify_cache_loc=torch.tensor([[100, 101, 102, 103, 104]]),
+            prefix_lens=torch.tensor([10]),
+            block_table=torch.tensor([[0]]),
+            block_size=4,
+        )
+    assert plan.source_rows.shape == (1, 5)
+    assert plan.source_rows.tolist() == [[100, 101, 103, -1, -1]]
+    assert plan.dest_positions.tolist() == [[10, 11, 12, -1, -1]]
+    assert plan.dest_slots.tolist() == [[100, 101, 102, -1, -1]]
+    assert plan.commit_lens.tolist() == [3]
 
 
 def test_tree_round_shapes_and_ancestor_only_slots():

@@ -14,7 +14,7 @@ Semantics (from vllm-ascend):
   reuses the existing verify -> history move.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -37,6 +37,12 @@ class NodePlan:
     query_cu: torch.Tensor  # [n + 1] int32
     hidden_ids: torch.Tensor  # [n] int64
     token_index: torch.Tensor  # [n] int64
+    window_pages_cache: dict[tuple[int, int, int, int], tuple[int, ...]] = field(
+        default_factory=dict
+    )
+    attn_metadata_cache: dict[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = (
+        field(default_factory=dict)
+    )
 
 
 def build_node_plan(pre) -> NodePlan:
@@ -309,15 +315,20 @@ class NodeRecord:
 
 
 def _window_pages(plan: NodePlan, table: torch.Tensor, ratio: int, rows: int):
+    key = (table.data_ptr(), int(table.shape[1]), int(ratio), int(rows))
+    cached = plan.window_pages_cache.get(key)
+    if cached is not None:
+        return cached
     req_ids = plan.req_ids.tolist()
     starts = plan.start.tolist()
     depth_limit = int(plan.max_q)
     width = int(table.shape[1])
     table_host = table.tolist()
     pages: set[int] = set()
-    n_req = max(req_ids) + 1 if req_ids else 0
-    for req in range(n_req):
-        first = req_ids.index(req)
+    first_by_req: dict[int, int] = {}
+    for idx, req in enumerate(req_ids):
+        first_by_req.setdefault(req, idx)
+    for req, first in first_by_req.items():
         prefix = int(starts[first])
         for pos in range(prefix, prefix + depth_limit):
             cpos = pos // ratio
@@ -327,7 +338,9 @@ def _window_pages(plan: NodePlan, table: torch.Tensor, ratio: int, rows: int):
             page = int(table_host[req][col])
             if page > 0:
                 pages.add(page)
-    return tuple(sorted(pages))
+    result = tuple(sorted(pages))
+    plan.window_pages_cache[key] = result
+    return result
 
 
 def record_compressed_nodes(

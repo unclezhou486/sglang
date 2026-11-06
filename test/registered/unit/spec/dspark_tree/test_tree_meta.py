@@ -1,6 +1,6 @@
 """CPU tests for DSV4 tree metadata, sparse indices, attention reference, commit."""
 
-import os
+from unittest import mock
 
 import pytest
 import torch
@@ -79,6 +79,24 @@ class TestTreeMetadata:
         assert meta.tree_prefix.tolist() == [10, 10, 10, 10, 10]
         assert meta.node_req_ids.tolist() == [0, 0, 0, 0, 0]
 
+    def test_build_tree_metadata_uploads_ancestors_once(self):
+        original = torch.tensor
+        uploads = []
+
+        def counted_tensor(*args, **kwargs):
+            if kwargs.get("device") is not None:
+                uploads.append(1)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(torch, "tensor", side_effect=counted_tensor):
+            build_tree_metadata(
+                _branch_layout(),
+                prefix_lens=torch.tensor([10]),
+                anchor_tokens=torch.tensor([100]),
+                num_nodes=4,
+            )
+        assert len(uploads) == 1
+
     def test_chain_metadata(self):
         meta = build_chain_metadata(prefix_lens=torch.tensor([10]), depth=3, anchor_tokens=torch.tensor([100]))
         assert meta.positions.tolist() == [10, 11, 12, 13]
@@ -146,6 +164,21 @@ class TestSparseIndices:
         )
         node2 = set(int(x) for x in slots[2, 0] if x >= 0)
         assert 1003 in node2 and 1004 in node2 and 1005 not in node2
+
+    def test_sparse_indices_do_not_read_each_position_from_device(self):
+        layout = _branch_layout()
+        with mock.patch.object(
+            torch.Tensor, "item", side_effect=AssertionError("device readback")
+        ):
+            slots = build_tree_ori_sparse_indices(
+                layout,
+                prefix_lens=torch.tensor([3]),
+                block_table=torch.tensor([[0, 1, 2, 3]]),
+                block_size=4,
+                window=4,
+                budget=4,
+            )
+        assert slots.shape == (5, 1, 128)
 
     def test_draft_slots_override_stale_req_to_token(self):
         from tree.layout import build_chain_layout
@@ -267,9 +300,9 @@ class TestCommitPlan:
             block_table=torch.tensor([[0, 1, 2, 3, 4]]),
             block_size=4,
         )
-        assert plan.source_rows.tolist() == [[100, 101, 103]]
-        assert plan.dest_positions.tolist() == [[10, 11, 12]]
-        assert plan.dest_slots.tolist() == [[100, 101, 102]]
+        assert plan.source_rows.tolist() == [[100, 101, 103, -1, -1]]
+        assert plan.dest_positions.tolist() == [[10, 11, 12, -1, -1]]
+        assert plan.dest_slots.tolist() == [[100, 101, 102, -1, -1]]
         assert plan.commit_lens.tolist() == [3]
         assert plan.new_seq_lens.tolist() == [13]
 
@@ -281,8 +314,8 @@ class TestCommitPlan:
             block_table=torch.tensor([[0, 1, 2]]),
             block_size=4,
         )
-        assert plan.source_rows.tolist() == [[100]]
-        assert plan.dest_positions.tolist() == [[7]]
+        assert plan.source_rows.tolist() == [[100, -1, -1]]
+        assert plan.dest_positions.tolist() == [[7, -1, -1]]
         assert plan.commit_lens.tolist() == [1]
 
     def test_apply_without_pool_or_hook_raises(self):

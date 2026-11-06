@@ -23,7 +23,7 @@ class TreeMetadata:
     num_nodes: int
 
 
-def _ancestor_row(layout, req: int, node_id: int, max_depth: int) -> list[int]:
+def _ancestor_row(parents_row: list[int], node_id: int, max_depth: int) -> list[int]:
     if node_id <= 0:
         row = [0]
     else:
@@ -31,7 +31,7 @@ def _ancestor_row(layout, req: int, node_id: int, max_depth: int) -> list[int]:
         cur = node_id
         while cur > 0:
             row.append(int(cur))
-            cur = int(layout.parents[req, cur - 1])
+            cur = int(parents_row[cur - 1])
         row.append(0)
         row.reverse()
     if len(row) > max_depth + 1:
@@ -47,6 +47,7 @@ def build_tree_metadata(
     *,
     prefix_lens: torch.Tensor,
     anchor_tokens: torch.Tensor,
+    num_nodes: int | None = None,
 ) -> TreeMetadata:
     """Build per-node verify geometry for a finalized TreeLayout."""
     batch, budget = layout.tokens.shape
@@ -54,7 +55,8 @@ def build_tree_metadata(
         raise ValueError("prefix_lens/anchor_tokens batch mismatch")
     device = layout.tokens.device
     query_width = budget + 1
-    num_nodes = int(layout.num_nodes.max().item()) if batch else 0
+    if num_nodes is None:
+        num_nodes = int(layout.num_nodes.max().item()) if batch else 0
     max_depth = int(layout.depths.max().item()) if budget else 0
 
     depths = torch.cat(
@@ -71,19 +73,20 @@ def build_tree_metadata(
     positions_2d = prefix_2d + depths
     seqused_2d = positions_2d + 1
 
-    ancestors = torch.full(
-        (batch, query_width, max_depth + 1),
-        -1,
-        dtype=torch.long,
-        device=device,
-    )
-    for req in range(batch):
-        for node_id in range(query_width):
-            ancestors[req, node_id] = torch.tensor(
-                _ancestor_row(layout, req, node_id, max_depth),
-                dtype=torch.long,
-                device=device,
-            )
+    parents_host = layout.parents.detach().to("cpu").tolist()
+    if batch:
+        ancestors_host = [
+            [
+                _ancestor_row(parents_host[req], node_id, max_depth)
+                for node_id in range(query_width)
+            ]
+            for req in range(batch)
+        ]
+        ancestors = torch.tensor(ancestors_host, dtype=torch.long, device=device)
+    else:
+        ancestors = torch.empty(
+            (0, query_width, max_depth + 1), dtype=torch.long, device=device
+        )
 
     node_req_ids = torch.arange(batch, device=device).repeat_interleave(query_width)
     node_cu = torch.arange(

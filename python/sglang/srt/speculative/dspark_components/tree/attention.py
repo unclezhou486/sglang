@@ -38,8 +38,26 @@ def build_tree_attn_metadata(*, query, metadata, plan, ratio, window, cmp_sparse
 
     Mirrors vllm-ascend's ``native_attention``: the metadata is generated from
     per-node seqused lengths, and the same ``cu_seqlens_*`` args are passed to
-    the tree op.
+    the tree op. Metadata is layer-independent for a given plan/ratio/topk, so
+    cache it on the plan instead of rebuilding it for every attention layer.
     """
+    cmp_topk = (
+        int(cmp_sparse_indices.shape[-1])
+        if cmp_sparse_indices is not None and int(ratio) == 4
+        else 0
+    )
+    cache_key = (
+        int(ratio),
+        int(window),
+        cmp_topk,
+        compressed is not None,
+        int(plan.n),
+        tuple(query.shape),
+    )
+    cached = plan.attn_metadata_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     seq = metadata.node_seqused_kv.to(torch.int32)
     cu_ori = torch.cat((seq.new_zeros(1), seq.cumsum(0, dtype=torch.int32)))
     cu_cmp = torch.cat(
@@ -52,12 +70,9 @@ def build_tree_attn_metadata(*, query, metadata, plan, ratio, window, cmp_sparse
         metadata_tensor = torch.zeros(
             1024, dtype=torch.int32, device=query.device
         )
-        return metadata_tensor, cu_ori, cu_cmp
-    cmp_topk = (
-        int(cmp_sparse_indices.shape[-1])
-        if cmp_sparse_indices is not None and int(ratio) == 4
-        else 0
-    )
+        result = (metadata_tensor, cu_ori, cu_cmp)
+        plan.attn_metadata_cache[cache_key] = result
+        return result
     kwargs = dict(
         num_heads_q=query.shape[1],
         num_heads_kv=1,
@@ -93,7 +108,9 @@ def build_tree_attn_metadata(*, query, metadata, plan, ratio, window, cmp_sparse
             "torch.ops.custom.npu_sparse_attn_sharedkv_metadata (or the "
             "_C_ascend equivalent); it is unavailable."
         )
-    return op(**kwargs), cu_ori, cu_cmp
+    result = (op(**kwargs), cu_ori, cu_cmp)
+    plan.attn_metadata_cache[cache_key] = result
+    return result
 
 
 def _allow_cpu_reference() -> bool:

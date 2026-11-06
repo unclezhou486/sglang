@@ -73,7 +73,10 @@ def plan_tree_pre(
     )
     layout = builder.build(base_logits, root_token_ids)
     metadata = build_tree_metadata(
-        layout, prefix_lens=prefix_lens, anchor_tokens=root_token_ids
+        layout,
+        prefix_lens=prefix_lens,
+        anchor_tokens=root_token_ids,
+        num_nodes=builder.num_selected_nodes,
     )
     if metadata.query_width != config.verify_width:
         raise ValueError(

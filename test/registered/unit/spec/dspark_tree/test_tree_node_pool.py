@@ -5,6 +5,7 @@ import torch
 
 from tree.config import resolve_tree_config
 from tree.node_pool import (
+    _window_pages,
     build_node_descriptors,
     build_node_plan,
     compress_nodes,
@@ -112,6 +113,29 @@ def test_device_boundary_is_explicit():
             sin=torch.zeros(8, 64),
             plan=plan,
         )
+
+
+def test_window_pages_cache_avoids_repeated_table_host_copy():
+    pre = _pre()
+    plan = build_node_plan(pre)
+    calls = []
+
+    class FakeTable:
+        shape = (1, 4)
+
+        @staticmethod
+        def data_ptr():
+            return 123
+
+        def tolist(self):
+            calls.append(1)
+            return [[1, 2, 3, 4]]
+
+    table = FakeTable()
+    first = _window_pages(plan, table, ratio=4, rows=4)
+    second = _window_pages(plan, table, ratio=4, rows=4)
+    assert first == second == (1,)
+    assert len(calls) == 1
 
 
 def test_record_and_descriptors():

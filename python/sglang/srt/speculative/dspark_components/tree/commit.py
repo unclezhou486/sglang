@@ -20,11 +20,6 @@ class TreeCommitPlan:
     state_dest: torch.Tensor | None = None
 
 
-def _slot_of(block_table: torch.Tensor, req: int, pos: int, block_size: int) -> int:
-    page = int(block_table[req, pos // block_size])
-    return page * block_size + (pos % block_size)
-
-
 def plan_tree_commit(
     *,
     path_node_ids: torch.Tensor,
@@ -45,24 +40,43 @@ def plan_tree_commit(
     device = path_node_ids.device
     valid = path_node_ids >= 0
     num_accepted = valid.sum(dim=1).to(torch.int64)
-    max_rows = int(num_accepted.max().item()) + 1 if batch else 1
+    # Padded rows are -1 and are dropped by move_swa_kv / commit_lens. Keeping
+    # the width fixed avoids a max().item() host sync per decode step.
+    max_rows = path_node_ids.shape[1] + 1
 
     source_rows = torch.full((batch, max_rows), -1, dtype=torch.long, device=device)
     dest_positions = torch.full((batch, max_rows), -1, dtype=torch.long, device=device)
     dest_slots = torch.full((batch, max_rows), -1, dtype=torch.long, device=device)
-    for req in range(batch):
-        prefix = int(prefix_lens[req])
-        source_rows[req, 0] = verify_cache_loc[req, 0]
-        dest_positions[req, 0] = prefix
-        # The target verify already wrote the root/path rows into this
-        # window.  Use those columns as destinations instead of re-reading
-        # req_to_token, whose tree-depth columns may still be -1.
-        dest_slots[req, 0] = verify_cache_loc[req, 0]
-        for depth in range(int(num_accepted[req])):
-            node = int(path_node_ids[req, depth])
-            source_rows[req, depth + 1] = verify_cache_loc[req, node]
-            dest_positions[req, depth + 1] = prefix + depth + 1
-            dest_slots[req, depth + 1] = verify_cache_loc[req, depth + 1]
+
+    source_rows[:, 0] = verify_cache_loc[:, 0]
+    dest_positions[:, 0] = prefix_lens.long()
+    # The target verify already wrote the root/path rows into this window.
+    # Use those columns as destinations instead of re-reading req_to_token,
+    # whose tree-depth columns may still be -1.
+    dest_slots[:, 0] = verify_cache_loc[:, 0]
+
+    depth_count = max_rows - 1
+    if depth_count:
+        depth_offsets = torch.arange(
+            depth_count, dtype=torch.long, device=device
+        ).unsqueeze(0)
+        depth_valid = depth_offsets < num_accepted.unsqueeze(1)
+        path_nodes = path_node_ids[:, :depth_count].clamp(min=0).long()
+        source_rows[:, 1:] = torch.where(
+            depth_valid,
+            verify_cache_loc.gather(1, path_nodes),
+            source_rows[:, 1:],
+        )
+        dest_positions[:, 1:] = torch.where(
+            depth_valid,
+            prefix_lens.long().unsqueeze(1) + depth_offsets + 1,
+            dest_positions[:, 1:],
+        )
+        dest_slots[:, 1:] = torch.where(
+            depth_valid,
+            verify_cache_loc[:, 1:max_rows],
+            dest_slots[:, 1:],
+        )
 
     commit_lens = num_accepted + 1
     new_seq_lens = prefix_lens.to(torch.int64) + commit_lens
